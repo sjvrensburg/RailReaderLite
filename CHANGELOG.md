@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.1
+
+Two bugs surfaced by trying to actually use the 0.5.0 viewer.
+
+### Fixed
+
+- **Bottom status bar restored.** When the search controls landed in
+  the toolbar in 0.5.0, the `StatusText` `TextBlock` got dropped from
+  the layout — so "Copied N characters", "Failed to open: …", and the
+  current file name all updated in the viewmodel but nothing rendered
+  them. Added a dedicated status bar at the bottom of the window.
+- **Bumped `RailReader.Core` family → 0.7.2.** That release fixed the
+  PdfPig text-extraction bug where word spaces and line breaks weren't
+  reconstructed from the geometry (PdfPig.Letters has no explicit
+  space tokens). Before 0.7.2, drag-to-copy produced strings like
+  `"Besides,eachtypeofmethodisconstracks…"` and any multi-word search
+  silently missed every hit. With 0.7.2 the extracted text contains
+  word spaces and `'\n'`s at the right places; the existing search /
+  selection paths in this app just work.
+
 ## 0.5.0
 
 Full-text search and drag-to-copy selection — the two features the

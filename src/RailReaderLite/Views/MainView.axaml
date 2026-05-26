@@ -11,7 +11,7 @@
     <vm:MainViewModel />
   </Design.DataContext>
 
-  <Grid RowDefinitions="Auto,*">
+  <Grid RowDefinitions="Auto,*,Auto">
     <!-- Toolbar -->
     <Border Grid.Row="0" Padding="12,8" Background="{DynamicResource SystemControlBackgroundChromeMediumBrush}">
       <DockPanel>
@@ -50,6 +50,19 @@
                    KeyDown="OnSearchBoxKeyDown" />
         </StackPanel>
       </DockPanel>
+    </Border>
+
+    <!-- Status bar (bottom). Surfaces StatusText — covers things like
+         "Copied 42 characters." / "Failed to open: …" / file name on
+         load. Was inadvertently dropped in 0.5.0 when the toolbar
+         picked up search controls. -->
+    <Border Grid.Row="2" Padding="12,6"
+            BorderThickness="0,1,0,0"
+            BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}"
+            Background="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}">
+      <TextBlock Text="{Binding StatusText}"
+                 Opacity="0.85"
+                 TextTrimming="CharacterEllipsis" />
     </Border>
 
     <!-- Main area: optional outline pane + page viewport -->

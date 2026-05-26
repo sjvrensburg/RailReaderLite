@@ -1,5 +1,8 @@
+using System;
+using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Media.Imaging;
 using RailReaderLite.ViewModels;
 
@@ -34,7 +37,7 @@ public partial class MainView : UserControl
         _ = sender; _ = e;
     }
 
-    private void OnPagePointerReleased(object? sender, PointerReleasedEventArgs e)
+    private async void OnPagePointerReleased(object? sender, PointerReleasedEventArgs e)
     {
         if (sender is not Image img) return;
         if (_selectionAnchor is not { } anchor) return;
@@ -43,12 +46,55 @@ public partial class MainView : UserControl
         {
             var end = ToPagePoint(img, e);
             if (end is null) return;
-            if (DataContext is MainViewModel vm)
-                vm.CompleteSelection(anchor.X, anchor.Y, end.Value.X, end.Value.Y);
+            if (DataContext is not MainViewModel vm) return;
+
+            // Compute the selection synchronously inside the
+            // user-gesture stack frame so the browser still
+            // considers the clipboard write authorised.
+            var selected = vm.GetSelectedText(anchor.X, anchor.Y, end.Value.X, end.Value.Y);
+
+            bool clipboardOk = false;
+            if (!string.IsNullOrEmpty(selected))
+            {
+                clipboardOk = await TryWriteClipboardAsync(selected);
+            }
+            vm.ReportSelectionResult(selected, clipboardOk);
         }
         finally
         {
             _selectionAnchor = null;
+        }
+    }
+
+    /// <summary>
+    /// Writes <paramref name="text"/> to the system clipboard via
+    /// Avalonia 12's <see cref="IDataTransfer"/> model. Called from the
+    /// View so we can resolve <c>TopLevel</c> off the control (works in
+    /// every Avalonia hosting model, including
+    /// <c>IActivityApplicationLifetime</c> used by Avalonia.Browser).
+    /// Returns true if the write was dispatched without throwing;
+    /// the browser may still reject the write asynchronously (e.g. if
+    /// no permission), in which case the user sees the status text but
+    /// nothing lands in the clipboard.
+    /// </summary>
+    private async Task<bool> TryWriteClipboardAsync(string text)
+    {
+        try
+        {
+            var top = TopLevel.GetTopLevel(this);
+            var clipboard = top?.Clipboard;
+            if (clipboard is null) return false;
+
+            var item = new DataTransferItem();
+            item.SetText(text);
+            var transfer = new DataTransfer();
+            transfer.Add(item);
+            await clipboard.SetDataAsync(transfer);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 

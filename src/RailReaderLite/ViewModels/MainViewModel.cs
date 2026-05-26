@@ -5,7 +5,6 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Avalonia;
-using Avalonia.Input;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Platform.Storage;
@@ -290,16 +289,22 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Called by the View when the user finishes a drag selection.
-    /// All four coordinates are in page-point space (origin top-left,
+    /// Called by the View when the user finishes a drag selection. All
+    /// four coordinates are in page-point space (origin top-left,
     /// Y-down) — the View handles the bitmap-pixel ↔ image-local
-    /// conversions and reports page-points to the VM.
+    /// conversions and reports page-points to the VM. Returns the
+    /// extracted text in reading order, or null if no glyph midpoints
+    /// fell inside the drag rect. The View is responsible for pushing
+    /// the result to the clipboard inside its own user-gesture frame
+    /// (Avalonia.Browser's <see cref="Avalonia.Controls.ApplicationLifetimes.IActivityApplicationLifetime"/>
+    /// makes <c>TopLevel</c> accessible to the View but not via
+    /// <c>Application.Current.ApplicationLifetime</c> on the VM side).
     /// </summary>
-    public void CompleteSelection(double pageX1, double pageY1, double pageX2, double pageY2)
+    public string? GetSelectedText(double pageX1, double pageY1, double pageX2, double pageY2)
     {
-        if (!HasDocument) return;
+        if (!HasDocument) return null;
         var text = GetOrExtractPageText(CurrentPage);
-        if (text.Text.Length == 0) return;
+        if (text.Text.Length == 0) return null;
 
         float l = (float)Math.Min(pageX1, pageX2);
         float r = (float)Math.Max(pageX1, pageX2);
@@ -307,42 +312,23 @@ public partial class MainViewModel : ViewModelBase
         float b = (float)Math.Max(pageY1, pageY2);
 
         // Reject degenerate / single-click selections.
-        if (r - l < 1f && b - t < 1f) return;
+        if (r - l < 1f && b - t < 1f) return null;
 
-        var selected = text.ExtractTextInRect(l, t, r, b);
-        if (string.IsNullOrWhiteSpace(selected))
-        {
-            StatusText = "No text in selection.";
-            return;
-        }
-
-        TrySetClipboardText(selected);
-        StatusText = $"Copied {selected.Length} characters.";
+        return text.ExtractTextInRect(l, t, r, b);
     }
 
-    private void TrySetClipboardText(string text)
+    /// <summary>
+    /// View calls this after the clipboard write completes so the VM
+    /// can surface the result in the toolbar status line.
+    /// </summary>
+    public void ReportSelectionResult(string? selectedText, bool clipboardOk)
     {
-        var topLevel = Avalonia.Application.Current?.ApplicationLifetime switch
-        {
-            Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime d
-                => Avalonia.Controls.TopLevel.GetTopLevel(d.MainWindow),
-            Avalonia.Controls.ApplicationLifetimes.ISingleViewApplicationLifetime s
-                => Avalonia.Controls.TopLevel.GetTopLevel(s.MainView),
-            _ => null,
-        };
-        var clipboard = topLevel?.Clipboard;
-        if (clipboard is null) return;
-
-        // Avalonia 12 replaced the old SetTextAsync(string) shortcut with
-        // the IDataTransfer model. Bundle the string in a DataTransferItem
-        // for the Text format and push it through SetDataAsync. Fire-and-
-        // forget; if it fails silently the user still gets the "Copied N
-        // characters" status text.
-        var item = new DataTransferItem();
-        item.SetText(text);
-        var transfer = new DataTransfer();
-        transfer.Add(item);
-        _ = clipboard.SetDataAsync(transfer);
+        if (string.IsNullOrEmpty(selectedText))
+            StatusText = "No text in selection.";
+        else if (clipboardOk)
+            StatusText = $"Copied {selectedText.Length} characters.";
+        else
+            StatusText = $"Selected {selectedText.Length} characters (clipboard unavailable).";
     }
 
     private async Task NavigateToPageAsync(int zeroBasedPage)
