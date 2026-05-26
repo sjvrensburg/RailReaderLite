@@ -41,6 +41,23 @@ public class SmokeTests
     }
 
     [Fact]
+    public void Search_is_disabled_until_a_document_is_open_and_query_is_set()
+    {
+        // 0.5.0 added search + selection. SearchCommand is gated on
+        // both HasDocument and a non-empty query. With no document and
+        // no query at construction time it must not be executable.
+        var vm = new MainViewModel();
+        Assert.False(vm.SearchCommand.CanExecute(null));
+        vm.SearchQuery = "hello"; // still no document
+        Assert.False(vm.SearchCommand.CanExecute(null));
+
+        Assert.Equal(-1, vm.CurrentMatchIndex);
+        Assert.Equal(0, vm.MatchCount);
+        Assert.False(vm.NextMatchCommand.CanExecute(null));
+        Assert.False(vm.PrevMatchCommand.CanExecute(null));
+    }
+
+    [Fact]
     public void Core_layout_constants_are_reachable()
     {
         // Sanity: a public symbol from RailReader.Core resolves at test-host

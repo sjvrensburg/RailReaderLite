@@ -33,13 +33,22 @@
                   IsVisible="{Binding HasOutline}"
                   ToolTip.Tip="Toggle outline panel" />
         </StackPanel>
-        <TextBlock DockPanel.Dock="Right"
-                   Text="{Binding StatusText}"
+
+        <!-- Search controls -->
+        <StackPanel Orientation="Horizontal" Spacing="6" DockPanel.Dock="Right"
+                    IsVisible="{Binding HasDocument}">
+          <TextBlock Text="{Binding MatchStatus}" VerticalAlignment="Center" MinWidth="60"
+                     Opacity="0.7" HorizontalAlignment="Right" />
+          <Button Content="✕" Command="{Binding ClearSearchCommand}" ToolTip.Tip="Clear search"
+                  IsVisible="{Binding MatchCount}" />
+          <Button Content="↑" Command="{Binding PrevMatchCommand}" ToolTip.Tip="Previous match" />
+          <Button Content="↓" Command="{Binding NextMatchCommand}" ToolTip.Tip="Next match (F3)" />
+          <TextBox Text="{Binding SearchQuery, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                   PlaceholderText="Find…"
+                   MinWidth="160"
                    VerticalAlignment="Center"
-                   HorizontalAlignment="Right"
-                   Opacity="0.7"
-                   TextTrimming="CharacterEllipsis"
-                   MaxWidth="400" />
+                   KeyDown="OnSearchBoxKeyDown" />
+        </StackPanel>
       </DockPanel>
     </Border>
 
@@ -75,19 +84,21 @@
                        Opacity="0.6" HorizontalAlignment="Center" />
           </StackPanel>
 
-          <!-- Rendered page: Stretch=Uniform fits the page to the viewport,
-               downscaling when the viewport is smaller than the rendered
-               bitmap. ScrollViewer kicks in once we add manual zoom in a
-               future version. -->
+          <!-- Rendered page. Pointer events handle drag-to-select. -->
           <ScrollViewer HorizontalScrollBarVisibility="Auto"
                         VerticalScrollBarVisibility="Auto"
                         IsVisible="{Binding HasDocument}">
-            <Image Source="{Binding PageImage}"
+            <Image x:Name="PageImageView"
+                   Source="{Binding PageImage}"
                    Stretch="Uniform"
                    StretchDirection="DownOnly"
                    HorizontalAlignment="Center"
                    VerticalAlignment="Center"
-                   Margin="16" />
+                   Margin="16"
+                   Cursor="IBeam"
+                   PointerPressed="OnPagePointerPressed"
+                   PointerMoved="OnPagePointerMoved"
+                   PointerReleased="OnPagePointerReleased" />
           </ScrollViewer>
 
           <!-- Busy indicator -->
