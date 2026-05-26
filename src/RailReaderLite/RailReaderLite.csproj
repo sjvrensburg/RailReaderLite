@@ -20,5 +20,6 @@
     </PackageReference>
     <PackageReference Include="CommunityToolkit.Mvvm" />
     <PackageReference Include="RailReader.Core" />
+    <PackageReference Include="RailReader.Core.PdfPig" />
   </ItemGroup>
 </Project>

@@ -13,7 +13,7 @@
   <Grid RowDefinitions="*,Auto" Margin="32">
     <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12">
       <TextBlock Text="RailReaderLite" FontSize="36" FontWeight="Bold" HorizontalAlignment="Center" />
-      <TextBlock Text="PDF rendering pending RailReader.Core.PdfPig (issue #11)."
+      <TextBlock Text="Pure-managed PDF parser wired up. Real PDF UI lands next."
                  Opacity="0.7" HorizontalAlignment="Center" />
     </StackPanel>
 
@@ -21,6 +21,8 @@
       <TextBlock Text="{Binding LiteVersion, StringFormat='Lite v\{0\}'}" />
       <TextBlock Text="·" />
       <TextBlock Text="{Binding CoreVersion, StringFormat='Core v\{0\}'}" />
+      <TextBlock Text="·" />
+      <TextBlock Text="{Binding PdfPigVersion, StringFormat='PdfPig v\{0\}'}" />
     </StackPanel>
   </Grid>
 </UserControl>
