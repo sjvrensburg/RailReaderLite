@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.5.0
+
+Full-text search and drag-to-copy selection — the two features the
+v0.4.0 viewer was missing to be genuinely usable for reading PDFs in
+the browser.
+
+### Added
+
+- **Full-text search across the open document.** Toolbar search box
+  (right side). Pressing Enter scans every page, highlights all
+  matches in soft yellow, navigates to the first match's page, and
+  highlights the current match in a brighter yellow. `↑` and `↓`
+  buttons cycle through matches across pages; status text reads
+  `N / M` to show position. `Esc` (in the search box) clears.
+  Case-insensitive substring match. Page text is cached after first
+  extraction so subsequent searches/selections don't re-parse.
+- **Drag-to-copy selection.** Pointer-press, drag, release on the
+  rendered page. Glyphs whose midpoints fall in the dragged rect are
+  extracted in reading order and copied to the system clipboard via
+  the Avalonia 12 `IDataTransfer` API. Status line confirms
+  "Copied N characters." Works the same in the WASM target — the
+  browser clipboard API is what backs `IClipboard` there. No live
+  highlight during drag in v0.5.0 (would burn 50–100 ms re-rendering
+  the bitmap per pointer-move); a future PR can add a Canvas overlay
+  for that.
+
+### Rendering
+
+- Search/selection highlights are painted directly into the per-page
+  render buffer (semi-transparent yellow rect blend over the RGB
+  bytes) before the bitmap is handed to Avalonia. Keeps coordinate
+  conversion in one place — page-points → bitmap pixels by
+  multiplying by `RenderScale = RenderTargetSize / max(pageW, pageH)`.
+  The View only knows about image-local pointer coords; the VM owns
+  the rest of the mapping.
+
+### Tests
+
+- New test gates `SearchCommand` on `HasDocument + non-empty query`
+  and verifies match navigation commands are disabled in the empty
+  state. Total **6 / 6** pass.
+
 ## 0.4.0
 
 Two viewer ergonomics features that the v0.3.x MVP was missing, plus
