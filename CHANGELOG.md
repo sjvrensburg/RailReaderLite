@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.3.0
+
+First working prototype: open a PDF, see pages, navigate. Wires up the
+full RailReaderCore stack — `RailReader.Renderer.PdfPigSkia` 0.7.0 for
+rasterisation alongside `RailReader.Core.PdfPig` 0.7.0 for parsing.
+
+### Added
+
+- **File-picker open flow.** Toolbar "Open PDF…" button uses Avalonia's
+  `IStorageProvider.OpenFilePickerAsync` (works the same in WASM and on
+  desktop hosts). Picked bytes are written to a process-local temp file
+  before being handed to `PdfPigSkiaPdfServiceFactory.CreatePdfService`
+  — the current Core API takes a file path; a future `byte[]` overload
+  on `PdfPigSkiaPdfService` will let us drop this hop.
+- **Page-by-page rendering.** `IPdfService.RenderPagePixmap(pageIndex,
+  targetSize: 1200)` returns RGB bytes; `RgbToAvaloniaBitmap` packs
+  them into an Avalonia `WriteableBitmap` with full-alpha BGRA layout
+  via `Marshal.Copy` — no unsafe blocks, portable across desktop and
+  WASM. Rendering happens on a background `Task.Run` to keep the UI
+  responsive; the result is dispatched back to the UI thread.
+- **Navigation toolbar.** Prev / Next buttons (gated by `CanPrev` /
+  `CanNext`), live page label "N / Total", busy indicator while a page
+  renders or a document loads.
+- **Empty state.** Until a document is loaded, the canvas shows
+  "RailReaderLite — Open a PDF to begin." Once loaded, the empty state
+  hides and the rendered page appears inside a scroll viewer.
+
+### Changed
+
+- `Directory.Packages.props` — bumped all family packages to 0.7.0
+  (Core, Core.PdfPig, Renderer.PdfPigSkia).
+- `MainViewModel` rewritten end-to-end as a document controller. Replaces
+  the version-only smoke shape from 0.2.0.
+- `MainView.axaml` rewritten as a real PDF-viewer chrome (toolbar +
+  scrollable rendered page) instead of the version-banner placeholder.
+- Smoke tests updated to match the new VM surface — 4 assertions all
+  pass (empty-state shape; Core, Core.PdfPig, Renderer.PdfPigSkia all
+  consumable from the shared net10.0 lib half).
+
+### Known limitations / honest caveats
+
+- **First open is slow.** PdfPig parses the document on every render
+  call (`PdfDocument.Open` is per-call inside the gate); for a multi-
+  page PDF this means re-parsing per page. Mitigation: future PR caches
+  page sizes or moves to a longer-lived `PdfDocument` instance.
+- **No zoom or text selection yet.** Page renders at a fixed
+  longest-edge of 1200 px. Rail mode, annotations, outline panel, and
+  text search are all 0.4.0+ features.
+- **WASM end-to-end not yet visually verified in this turn.** Build is
+  clean, dev server returns HTTP 200 with the Avalonia splash, but the
+  PDF-open → render round-trip in an actual browser hasn't been
+  exercised in CI. Manual smoke recommended (see README "Build & run").
+
 ## 0.2.0
 
 Wires `RailReader.Core.PdfPig` 0.6.0 (the pure-managed parser package
