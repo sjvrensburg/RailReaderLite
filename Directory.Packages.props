@@ -14,8 +14,8 @@
         <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.0" />
 
         <!-- RailReaderCore family — pin tight while we shake out the Lite consumer -->
-        <PackageVersion Include="RailReader.Core" Version="0.5.1" />
-        <!-- <PackageVersion Include="RailReader.Core.PdfPig" Version="0.6.*" />  ← awaiting issue #11 -->
+        <PackageVersion Include="RailReader.Core" Version="0.6.0" />
+        <PackageVersion Include="RailReader.Core.PdfPig" Version="0.6.0" />
 
         <!-- Test stack -->
         <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
