@@ -3,14 +3,15 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:RailReaderLite.ViewModels"
-             mc:Ignorable="d" d:DesignWidth="900" d:DesignHeight="650"
+             xmlns:m="using:RailReader.Core.Models"
+             mc:Ignorable="d" d:DesignWidth="1000" d:DesignHeight="700"
              x:Class="RailReaderLite.Views.MainView"
              x:DataType="vm:MainViewModel">
   <Design.DataContext>
     <vm:MainViewModel />
   </Design.DataContext>
 
-  <Grid RowDefinitions="Auto,*,Auto">
+  <Grid RowDefinitions="Auto,*">
     <!-- Toolbar -->
     <Border Grid.Row="0" Padding="12,8" Background="{DynamicResource SystemControlBackgroundChromeMediumBrush}">
       <DockPanel>
@@ -27,6 +28,10 @@
                   IsEnabled="{Binding CanNext}"
                   ToolTip.Tip="Next page" />
           <TextBlock Text="{Binding PageLabel}" VerticalAlignment="Center" MinWidth="60" />
+          <Button Content="☰  Outline"
+                  Command="{Binding ToggleOutlineCommand}"
+                  IsVisible="{Binding HasOutline}"
+                  ToolTip.Tip="Toggle outline panel" />
         </StackPanel>
         <TextBlock DockPanel.Dock="Right"
                    Text="{Binding StatusText}"
@@ -38,38 +43,63 @@
       </DockPanel>
     </Border>
 
-    <!-- Page area -->
-    <Border Grid.Row="1" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}">
-      <Panel>
-        <!-- Empty-state hint -->
-        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8"
-                    IsVisible="{Binding !HasDocument}">
-          <TextBlock Text="RailReaderLite"
-                     FontSize="32" FontWeight="Bold" HorizontalAlignment="Center" />
-          <TextBlock Text="Open a PDF to begin."
-                     Opacity="0.6" HorizontalAlignment="Center" />
-        </StackPanel>
+    <!-- Main area: optional outline pane + page viewport -->
+    <Grid Grid.Row="1" ColumnDefinitions="Auto,*">
+      <!-- Outline pane (left, collapsible) -->
+      <Border Grid.Column="0"
+              Width="260"
+              IsVisible="{Binding OutlineVisible}"
+              BorderThickness="0,0,1,0"
+              BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}"
+              Background="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}">
+        <TreeView ItemsSource="{Binding Outline}"
+                  SelectedItem="{Binding SelectedOutlineEntry, Mode=TwoWay}"
+                  Margin="4">
+          <TreeView.ItemTemplate>
+            <TreeDataTemplate ItemsSource="{Binding Children}" DataType="m:OutlineEntry">
+              <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" />
+            </TreeDataTemplate>
+          </TreeView.ItemTemplate>
+        </TreeView>
+      </Border>
 
-        <!-- Rendered page -->
-        <ScrollViewer HorizontalScrollBarVisibility="Auto"
-                      VerticalScrollBarVisibility="Auto"
-                      IsVisible="{Binding HasDocument}">
-          <Image Source="{Binding PageImage}"
-                 Stretch="None"
-                 HorizontalAlignment="Center"
-                 VerticalAlignment="Center"
-                 Margin="16" />
-        </ScrollViewer>
+      <!-- Page viewport -->
+      <Border Grid.Column="1" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}">
+        <Panel>
+          <!-- Empty-state hint -->
+          <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8"
+                      IsVisible="{Binding !HasDocument}">
+            <TextBlock Text="RailReaderLite"
+                       FontSize="32" FontWeight="Bold" HorizontalAlignment="Center" />
+            <TextBlock Text="Open a PDF to begin."
+                       Opacity="0.6" HorizontalAlignment="Center" />
+          </StackPanel>
 
-        <!-- Busy indicator -->
-        <Border IsVisible="{Binding IsBusy}"
-                Background="#A0000000"
-                CornerRadius="6"
-                Padding="16,10"
-                HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,24,0,0">
-          <TextBlock Text="Loading…" Foreground="White" />
-        </Border>
-      </Panel>
-    </Border>
+          <!-- Rendered page: Stretch=Uniform fits the page to the viewport,
+               downscaling when the viewport is smaller than the rendered
+               bitmap. ScrollViewer kicks in once we add manual zoom in a
+               future version. -->
+          <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                        VerticalScrollBarVisibility="Auto"
+                        IsVisible="{Binding HasDocument}">
+            <Image Source="{Binding PageImage}"
+                   Stretch="Uniform"
+                   StretchDirection="DownOnly"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center"
+                   Margin="16" />
+          </ScrollViewer>
+
+          <!-- Busy indicator -->
+          <Border IsVisible="{Binding IsBusy}"
+                  Background="#A0000000"
+                  CornerRadius="6"
+                  Padding="16,10"
+                  HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,24,0,0">
+            <TextBlock Text="Loading…" Foreground="White" />
+          </Border>
+        </Panel>
+      </Border>
+    </Grid>
   </Grid>
 </UserControl>
