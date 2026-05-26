@@ -22,6 +22,22 @@ public class SmokeTests
         Assert.Equal("—", vm.PageLabel);
         Assert.Null(vm.PageImage);
         Assert.False(vm.IsBusy);
+
+        // Outline state in empty doc: no entries, panel hidden.
+        Assert.Empty(vm.Outline);
+        Assert.False(vm.HasOutline);
+        Assert.False(vm.OutlineVisible);
+    }
+
+    [Fact]
+    public void ToggleOutline_flips_visibility()
+    {
+        var vm = new MainViewModel();
+        Assert.False(vm.OutlineVisible);
+        vm.ToggleOutlineCommand.Execute(null);
+        Assert.True(vm.OutlineVisible);
+        vm.ToggleOutlineCommand.Execute(null);
+        Assert.False(vm.OutlineVisible);
     }
 
     [Fact]

@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.0
+
+Two viewer ergonomics features that the v0.3.x MVP was missing, plus
+the perf win from picking up RailReaderCore 0.7.1.
+
+### Added
+
+- **Outline panel.** A collapsible left-hand `TreeView` shows the PDF's
+  bookmark tree. Clicking an entry navigates to its page. The "Outline"
+  toolbar button is only visible when the open document has bookmarks
+  and toggles the panel; the panel auto-opens on document load when
+  bookmarks exist. Wired through PdfPig's `TryGetBookmarks` (already
+  populated on `IPdfService.Outline`).
+- **Fit-to-window page rendering.** The `Image` now uses
+  `Stretch="Uniform"` with `StretchDirection="DownOnly"`. Large pages
+  scale down to fit the viewport (no horizontal scroll on letter-size
+  pages in a 1200-px window) while never being upscaled beyond their
+  natural render resolution. Render target bumped 1200 → 1600 px
+  longest-edge so the down-scaled view stays sharp on retina viewports.
+
+### Changed
+
+- Bumped all family packages 0.7.0 → 0.7.1 to pick up the
+  `RailReader.Renderer.PdfPigSkia` perf patch (cached `PdfDocument`,
+  byte[] ctor, `IDisposable`).
+- **Drop the temp-file hop.** `MainViewModel.OpenAsync` now feeds the
+  picker bytes straight into `new PdfPigSkiaPdfService(byte[])`. The
+  previous v0.3.1 flow wrote bytes to `Path.GetTempPath()` first
+  because Core only exposed a file-path constructor; that overload now
+  exists in 0.7.1 and Lite uses it.
+- **Dispose the previous document on Open.** When the user opens a
+  second PDF in the same session, `MainViewModel` now `Dispose()`s the
+  prior `PdfPigSkiaPdfService` to release the cached `PdfDocument`
+  deterministically.
+
+### Tests
+
+- 1 new viewmodel test: outline-toggle command flips visibility. Total
+  4 → 5 / 5 pass.
+
 ## 0.3.1
 
 ### Fixed

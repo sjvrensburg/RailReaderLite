@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
@@ -7,6 +8,7 @@ using Avalonia.Platform;
 using Avalonia.Platform.Storage;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using RailReader.Core.Models;
 using RailReader.Core.Services;
 using RailReader.Renderer.PdfPigSkia;
 
@@ -14,11 +16,11 @@ namespace RailReaderLite.ViewModels;
 
 public partial class MainViewModel : ViewModelBase
 {
-    private readonly IPdfServiceFactory _factory = new PdfPigSkiaPdfServiceFactory();
-
-    /// <summary>Target longest-edge pixel size for page rendering. ~1200 fits
-    /// most laptop viewports without over-rasterising.</summary>
-    private const int RenderTargetSize = 1200;
+    /// <summary>Target longest-edge pixel size for page rendering. Higher
+    /// gives the Stretch=Uniform Image control more pixels to downscale
+    /// from when the viewport is large; 1600 covers most laptop screens
+    /// without crushing pdfpig render times on a Pi-class CPU.</summary>
+    private const int RenderTargetSize = 1600;
 
     private IPdfService? _pdf;
 
@@ -35,6 +37,7 @@ public partial class MainViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(CanPrev))]
     [NotifyPropertyChangedFor(nameof(CanNext))]
     [NotifyPropertyChangedFor(nameof(HasDocument))]
+    [NotifyPropertyChangedFor(nameof(HasOutline))]
     [NotifyCanExecuteChangedFor(nameof(PrevCommand))]
     [NotifyCanExecuteChangedFor(nameof(NextCommand))]
     private int _pageCount;
@@ -48,9 +51,33 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     private bool _isBusy;
 
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasOutline))]
+    private System.Collections.Generic.List<OutlineEntry> _outline = [];
+
+    [ObservableProperty]
+    private bool _outlineVisible;
+
+    /// <summary>
+    /// Two-way bound to the outline TreeView. Setting this navigates to
+    /// the entry's page if it has one. Container nodes (no page) are
+    /// selectable but don't trigger navigation.
+    /// </summary>
+    public OutlineEntry? SelectedOutlineEntry
+    {
+        get => _selectedOutlineEntry;
+        set
+        {
+            if (SetProperty(ref _selectedOutlineEntry, value) && value?.Page is int page)
+                _ = NavigateToPageAsync(page);
+        }
+    }
+    private OutlineEntry? _selectedOutlineEntry;
+
     public bool HasDocument => _pdf is not null && PageCount > 0;
     public bool CanPrev => HasDocument && CurrentPage > 0;
     public bool CanNext => HasDocument && CurrentPage < PageCount - 1;
+    public bool HasOutline => Outline.Count > 0;
 
     public string PageLabel =>
         HasDocument ? $"{CurrentPage + 1} / {PageCount}" : "—";
@@ -77,20 +104,18 @@ public partial class MainViewModel : ViewModelBase
             await stream.CopyToAsync(memory);
             var bytes = memory.ToArray();
 
-            // PdfPigSkiaPdfService takes a file path. Drop the bytes
-            // into the WASM/process temp dir so a single string argument
-            // is sufficient; future API may add a byte[] overload to
-            // PdfPigSkiaPdfService and this dance goes away.
-            var tempPath = Path.Combine(Path.GetTempPath(),
-                $"railreaderlite_{System.Guid.NewGuid():N}.pdf");
-            await File.WriteAllBytesAsync(tempPath, bytes);
+            // Release the previous document deterministically — Core 0.7.1
+            // made PdfPigSkiaPdfService IDisposable so we can drop the
+            // cached PdfDocument without waiting for GC.
+            if (_pdf is IDisposable disposable) disposable.Dispose();
 
-            // IPdfService is intentionally not IDisposable — each
-            // render call opens its own document internally; the service
-            // holds no long-lived resources besides PdfBytes.
-            _pdf = _factory.CreatePdfService(tempPath);
-            PageCount = _pdf?.PageCount ?? 0;
+            // 0.7.1: byte[] ctor on PdfPigSkiaPdfService drops the
+            // temp-file hop that Lite previously needed.
+            _pdf = new PdfPigSkiaPdfService(bytes);
+            PageCount = _pdf.PageCount;
             CurrentPage = 0;
+            Outline = _pdf.Outline;
+            OutlineVisible = Outline.Count > 0;
             StatusText = files[0].Name;
             await RenderCurrentPageAsync();
         }
@@ -117,6 +142,18 @@ public partial class MainViewModel : ViewModelBase
     {
         if (!CanNext) return;
         CurrentPage++;
+        await RenderCurrentPageAsync();
+    }
+
+    [RelayCommand]
+    private void ToggleOutline() => OutlineVisible = !OutlineVisible;
+
+    private async Task NavigateToPageAsync(int zeroBasedPage)
+    {
+        if (!HasDocument) return;
+        if (zeroBasedPage < 0 || zeroBasedPage >= PageCount) return;
+        if (zeroBasedPage == CurrentPage) return;
+        CurrentPage = zeroBasedPage;
         await RenderCurrentPageAsync();
     }
 
