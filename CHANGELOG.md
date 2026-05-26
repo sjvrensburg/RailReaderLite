@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.1
+
+### Fixed
+
+- **WASM bundle missing native Skia.** Without
+  `<WasmBuildNative>true</WasmBuildNative>` in the Browser csproj, the
+  build emitted a warning ("`@(NativeFileReference) ... won't be linked
+  in`") and produced a WASM bundle that threw
+  `System.DllNotFoundException: libSkiaSharp at SKImageInfo..cctor()`
+  on the first frame — Avalonia uses SkiaSharp for text rendering, so
+  the app showed only the static splash and the Avalonia bootstrap
+  never completed. Enabled native linking; first build now compiles
+  `libSkiaSharp.a` + `libHarfBuzzSharp.a` into `dotnet.native.wasm`,
+  and the viewer renders pages end-to-end in the browser.
+
+### Build dependency
+
+Native linking requires the `wasm-tools` workload (Emscripten 3.1.56
+toolchain). Install with `dotnet workload install wasm-tools`. The
+existing `.github/workflows/build.yml` already runs this step on CI;
+local dev needs it too. On Ubuntu specifically the apt-installed
+`dotnet-sdk-10` package mishandles `dotnet workload install` (it
+claims success but doesn't persist the workload manifest); install
+dotnet user-level via `dotnet-install.sh --channel 10.0 --install-dir
+~/.dotnet` and put that on PATH ahead of the system one.
+
 ## 0.3.0
 
 First working prototype: open a PDF, see pages, navigate. Wires up the
