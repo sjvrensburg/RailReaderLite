@@ -6,11 +6,11 @@ Same business logic as the desktop
 [railreader2](https://github.com/sjvrensburg/railreader2), targeting the
 browser instead of native.
 
-**Status:** v0.1.0 — toolchain proof only. The Avalonia.Browser shell builds
-and runs, and consumes the published `RailReader.Core` NuGet package. PDF
-rendering and rail-mode features land in 0.2.0+, gated on the
-`RailReader.Core.PdfPig` sibling package (RailReaderCore
-[issue #11](https://github.com/sjvrensburg/RailReaderCore/issues/11)).
+**Status:** v0.3.1 — first end-to-end working prototype. Open a PDF, render
+pages, navigate. Built on `RailReader.Core.PdfPig` (parsing) and
+`RailReader.Renderer.PdfPigSkia` (rasterisation), both pure-managed; no
+PDFium, no ONNX. Zoom, outline panel, text selection, rail mode are
+0.4.0+ features.
 
 ## Project layout
 
@@ -35,8 +35,34 @@ dotnet run --project src/RailReaderLite.Browser -c Release
 dotnet test tests/RailReaderLite.Tests -c Release
 ```
 
-Prerequisites: .NET 10 SDK. The first browser run downloads the WASM workload
-artifacts automatically.
+### Prerequisites
+
+- .NET 10 SDK.
+- The `wasm-tools` workload (Emscripten 3.1.56 toolchain) — needed to
+  statically link `libSkiaSharp.a` + `libHarfBuzzSharp.a` into
+  `dotnet.native.wasm`. Without it the bundle throws
+  `System.DllNotFoundException: libSkiaSharp` at first frame:
+
+  ```bash
+  dotnet workload install wasm-tools
+  ```
+
+**Ubuntu sharp edge.** Ubuntu's apt-installed `dotnet-sdk-10` package
+mishandles `dotnet workload install` — it reports success but the
+manifest never persists. If you're on Ubuntu, install dotnet user-level
+instead:
+
+```bash
+curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+chmod +x /tmp/dotnet-install.sh
+/tmp/dotnet-install.sh --channel 10.0 --install-dir ~/.dotnet
+
+# Then put ~/.dotnet ahead of /usr/bin/dotnet on PATH (.bashrc):
+export PATH="$HOME/.dotnet:$PATH"
+export DOTNET_ROOT="$HOME/.dotnet"
+
+dotnet workload install wasm-tools   # now lands in ~/.dotnet/
+```
 
 ## Consuming an unreleased RailReaderCore build
 

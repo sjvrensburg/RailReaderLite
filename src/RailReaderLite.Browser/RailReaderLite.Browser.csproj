@@ -4,6 +4,14 @@
     <OutputType>Exe</OutputType>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>enable</Nullable>
+    <!--
+      Statically link native Skia/HarfBuzz archives into the WASM bundle.
+      Avalonia.Browser uses SkiaSharp for all rendering (text included),
+      so without this the first frame throws `System.DllNotFoundException:
+      libSkiaSharp` from `SKImageInfo..cctor()`. Requires the wasm-tools
+      workload (Emscripten).
+    -->
+    <WasmBuildNative>true</WasmBuildNative>
   </PropertyGroup>
 
   <ItemGroup>
