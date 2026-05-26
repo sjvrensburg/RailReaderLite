@@ -3,26 +3,73 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:RailReaderLite.ViewModels"
-             mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+             mc:Ignorable="d" d:DesignWidth="900" d:DesignHeight="650"
              x:Class="RailReaderLite.Views.MainView"
              x:DataType="vm:MainViewModel">
   <Design.DataContext>
     <vm:MainViewModel />
   </Design.DataContext>
 
-  <Grid RowDefinitions="*,Auto" Margin="32">
-    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12">
-      <TextBlock Text="RailReaderLite" FontSize="36" FontWeight="Bold" HorizontalAlignment="Center" />
-      <TextBlock Text="Pure-managed PDF parser wired up. Real PDF UI lands next."
-                 Opacity="0.7" HorizontalAlignment="Center" />
-    </StackPanel>
+  <Grid RowDefinitions="Auto,*,Auto">
+    <!-- Toolbar -->
+    <Border Grid.Row="0" Padding="12,8" Background="{DynamicResource SystemControlBackgroundChromeMediumBrush}">
+      <DockPanel>
+        <StackPanel Orientation="Horizontal" Spacing="8" DockPanel.Dock="Left">
+          <Button Content="Open PDF…"
+                  Command="{Binding OpenCommand}"
+                  CommandParameter="{Binding $parent[TopLevel].StorageProvider}" />
+          <Button Content="◀"
+                  Command="{Binding PrevCommand}"
+                  IsEnabled="{Binding CanPrev}"
+                  ToolTip.Tip="Previous page" />
+          <Button Content="▶"
+                  Command="{Binding NextCommand}"
+                  IsEnabled="{Binding CanNext}"
+                  ToolTip.Tip="Next page" />
+          <TextBlock Text="{Binding PageLabel}" VerticalAlignment="Center" MinWidth="60" />
+        </StackPanel>
+        <TextBlock DockPanel.Dock="Right"
+                   Text="{Binding StatusText}"
+                   VerticalAlignment="Center"
+                   HorizontalAlignment="Right"
+                   Opacity="0.7"
+                   TextTrimming="CharacterEllipsis"
+                   MaxWidth="400" />
+      </DockPanel>
+    </Border>
 
-    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Center" Spacing="16" Opacity="0.5">
-      <TextBlock Text="{Binding LiteVersion, StringFormat='Lite v\{0\}'}" />
-      <TextBlock Text="·" />
-      <TextBlock Text="{Binding CoreVersion, StringFormat='Core v\{0\}'}" />
-      <TextBlock Text="·" />
-      <TextBlock Text="{Binding PdfPigVersion, StringFormat='PdfPig v\{0\}'}" />
-    </StackPanel>
+    <!-- Page area -->
+    <Border Grid.Row="1" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}">
+      <Panel>
+        <!-- Empty-state hint -->
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8"
+                    IsVisible="{Binding !HasDocument}">
+          <TextBlock Text="RailReaderLite"
+                     FontSize="32" FontWeight="Bold" HorizontalAlignment="Center" />
+          <TextBlock Text="Open a PDF to begin."
+                     Opacity="0.6" HorizontalAlignment="Center" />
+        </StackPanel>
+
+        <!-- Rendered page -->
+        <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                      VerticalScrollBarVisibility="Auto"
+                      IsVisible="{Binding HasDocument}">
+          <Image Source="{Binding PageImage}"
+                 Stretch="None"
+                 HorizontalAlignment="Center"
+                 VerticalAlignment="Center"
+                 Margin="16" />
+        </ScrollViewer>
+
+        <!-- Busy indicator -->
+        <Border IsVisible="{Binding IsBusy}"
+                Background="#A0000000"
+                CornerRadius="6"
+                Padding="16,10"
+                HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,24,0,0">
+          <TextBlock Text="Loading…" Foreground="White" />
+        </Border>
+      </Panel>
+    </Border>
   </Grid>
 </UserControl>

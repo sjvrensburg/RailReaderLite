@@ -7,16 +7,21 @@ namespace RailReaderLite.Tests;
 public class SmokeTests
 {
     [Fact]
-    public void MainViewModel_constructs()
+    public void MainViewModel_constructs_in_empty_state()
     {
-        // Proves the shared project + both family deps (Core, Core.PdfPig)
-        // resolve. The Browser project itself can't be unit-tested here
-        // (net10.0-browser can't host xUnit), so the smoke test exercises
-        // the shared half.
+        // Proves the shared project + both family deps (Core,
+        // Core.PdfPig, Renderer.PdfPigSkia) resolve. Browser project
+        // itself can't be unit-tested here (net10.0-browser can't host
+        // xUnit), so the smoke test exercises the shared half.
         var vm = new MainViewModel();
-        Assert.False(string.IsNullOrWhiteSpace(vm.CoreVersion));
-        Assert.False(string.IsNullOrWhiteSpace(vm.PdfPigVersion));
-        Assert.False(string.IsNullOrWhiteSpace(vm.LiteVersion));
+        Assert.False(vm.HasDocument);
+        Assert.False(vm.CanPrev);
+        Assert.False(vm.CanNext);
+        Assert.Equal(0, vm.CurrentPage);
+        Assert.Equal(0, vm.PageCount);
+        Assert.Equal("—", vm.PageLabel);
+        Assert.Null(vm.PageImage);
+        Assert.False(vm.IsBusy);
     }
 
     [Fact]
@@ -30,10 +35,18 @@ public class SmokeTests
     [Fact]
     public void PdfPig_text_service_constructs()
     {
-        // Sanity: the pure-managed parser package is consumable. We don't
-        // hand it a real PDF here — that's the v0.3.0 turn with embedded
-        // sample fixtures.
+        // Sanity: the pure-managed parser package is consumable.
         var svc = new RailReader.Core.PdfPig.PdfTextService();
         Assert.NotNull(svc);
+    }
+
+    [Fact]
+    public void PdfPigSkia_factory_constructs()
+    {
+        // Sanity: the rasterisation renderer package is consumable
+        // and exposes the full IPdfServiceFactory surface.
+        var factory = new RailReader.Renderer.PdfPigSkia.PdfPigSkiaPdfServiceFactory();
+        Assert.NotNull(factory.CreatePdfTextService());
+        Assert.NotNull(factory.CreatePdfLinkService());
     }
 }
