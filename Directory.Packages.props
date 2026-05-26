@@ -1,0 +1,25 @@
+<Project>
+    <PropertyGroup>
+        <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- Avalonia (browser-targeting only — desktop/mobile live in their own repos) -->
+        <PackageVersion Include="Avalonia" Version="12.0.3" />
+        <PackageVersion Include="Avalonia.Themes.Fluent" Version="12.0.3" />
+        <PackageVersion Include="Avalonia.Fonts.Inter" Version="12.0.3" />
+        <PackageVersion Include="Avalonia.Browser" Version="12.0.3" />
+        <PackageVersion Include="AvaloniaUI.DiagnosticsSupport" Version="2.2.1" />
+
+        <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+
+        <!-- RailReaderCore family — pin tight while we shake out the Lite consumer -->
+        <PackageVersion Include="RailReader.Core" Version="0.5.1" />
+        <!-- <PackageVersion Include="RailReader.Core.PdfPig" Version="0.6.*" />  ← awaiting issue #11 -->
+
+        <!-- Test stack -->
+        <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+        <PackageVersion Include="xunit" Version="2.9.3" />
+        <PackageVersion Include="xunit.runner.visualstudio" Version="3.0.1" />
+    </ItemGroup>
+</Project>

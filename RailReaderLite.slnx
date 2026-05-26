@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/RailReaderLite/RailReaderLite.csproj" />
+  <Project Path="src/RailReaderLite.Browser/RailReaderLite.Browser.csproj" />
+  <Project Path="tests/RailReaderLite.Tests/RailReaderLite.Tests.csproj" />
+</Solution>

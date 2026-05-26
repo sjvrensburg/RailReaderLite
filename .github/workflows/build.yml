@@ -1,0 +1,48 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  NUGET_XML_DOC_MODE: skip
+
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install WASM workload
+        run: dotnet workload install wasm-tools
+
+      - name: Restore
+        run: dotnet restore RailReaderLite.slnx
+
+      - name: Build
+        run: dotnet build RailReaderLite.slnx -c Release -p:ContinuousIntegrationBuild=true --no-restore
+
+      - name: Test
+        run: dotnet test tests/RailReaderLite.Tests -c Release --no-build --logger "console;verbosity=detailed"
+
+      - name: Publish browser bundle
+        run: dotnet publish src/RailReaderLite.Browser -c Release -o dist/ --no-build
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: railreaderlite-wasm
+          path: dist/wwwroot/
