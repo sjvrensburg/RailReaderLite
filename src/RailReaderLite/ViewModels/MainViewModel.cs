@@ -882,19 +882,6 @@ public partial class MainViewModel : ViewModelBase
             if (n == 0)
                 return (new PageAnalysis { Blocks = [], PageWidth = w, PageHeight = h }, new List<List<RectF>>());
 
-            // Pre-reorder dump so we can see what Docstrum produced
-            // before Klampfl rearranges. Helps tell apart a
-            // segmenter bug from a reading-order bug.
-            System.Console.WriteLine(
-                $"[RailReaderLite] segmenter page {pageIndex}: {n} raw blocks");
-            for (int i = 0; i < n; i++)
-            {
-                var bb = segment.Blocks[i].BBox;
-                System.Console.WriteLine(
-                    $"  raw {i}: x={bb.X:F1} y={bb.Y:F1} " +
-                    $"w={bb.W:F1} h={bb.H:F1}  lines={segment.Blocks[i].Lines.Count}");
-            }
-
             float tol = (float)(w * 0.005f);
             var order = KlampflReadingOrder.DetectOrder(segment.Blocks, tol, ReadingMode.ColumnWise);
             var orderedBlocks = new List<LayoutBlock>(n);
@@ -954,39 +941,12 @@ public partial class MainViewModel : ViewModelBase
             RailFirstLineOfPageCommand.NotifyCanExecuteChanged();
             RailLastLineOfPageCommand.NotifyCanExecuteChanged();
 
-            // Diagnostic logging — surfaces block geometry + reading
-            // order to the JS console so we can see what the
-            // segmenter is actually producing on a user-supplied
-            // document. Remove (or gate) once the column-awareness
-            // story has settled.
-            LogAnalysisToConsole(pageIndex, result);
-
             // Fire-and-forget decoration detection — runs once per
             // document, requires ≥2 analyzed pages. Kicks off in the
             // background so the user's first ↓ isn't blocked.
             _ = EnsureDecorationDetectedAsync();
         }
         return result;
-    }
-
-    /// <summary>Dumps per-page block geometry and reading order to
-    /// <c>Console.WriteLine</c>, which Avalonia.Browser pipes into the
-    /// browser console. Used to diagnose "rail mode not column-aware"
-    /// reports without needing a custom debug UI.</summary>
-    private static void LogAnalysisToConsole(int pageIndex, PageAnalysis a)
-    {
-        System.Console.WriteLine(
-            $"[RailReaderLite] page {pageIndex}: {a.Blocks.Count} blocks, " +
-            $"pageSize {a.PageWidth:F1}×{a.PageHeight:F1}");
-        for (int i = 0; i < a.Blocks.Count; i++)
-        {
-            var b = a.Blocks[i];
-            System.Console.WriteLine(
-                $"  block {i} (order={b.Order}) " +
-                $"x={b.BBox.X:F1} y={b.BBox.Y:F1} " +
-                $"w={b.BBox.W:F1} h={b.BBox.H:F1}  " +
-                $"lines={b.Lines.Count}");
-        }
     }
 
     /// <summary>Cache-only lookup — used by the rail-nav commands when
