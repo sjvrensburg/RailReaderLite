@@ -1,5 +1,6 @@
 using System;
 using System.Threading.Tasks;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
@@ -10,9 +11,12 @@ namespace RailReaderLite.Views;
 
 public partial class MainView : UserControl
 {
-    /// <summary>Start point of an in-flight drag selection, in page-point
-    /// coordinates. Null when no drag is active.</summary>
-    private (double X, double Y)? _selectionAnchor;
+    /// <summary>Start point of an in-flight drag selection, in image-local
+    /// (control) coordinates. Stored in image-local rather than page-point
+    /// space so <see cref="OnPagePointerMoved"/> can update the overlay
+    /// rectangle without re-running the inverse mapping every frame.
+    /// Null when no drag is active.</summary>
+    private Point? _selectionStart;
 
     public MainView()
     {
@@ -23,35 +27,50 @@ public partial class MainView : UserControl
     {
         if (sender is not Image img) return;
         if (!e.GetCurrentPoint(img).Properties.IsLeftButtonPressed) return;
-        var pt = ToPagePoint(img, e);
-        if (pt is null) return;
-        _selectionAnchor = pt;
+        var local = e.GetPosition(img);
+        if (local.X < 0 || local.Y < 0 ||
+            local.X > img.Bounds.Width || local.Y > img.Bounds.Height) return;
+        _selectionStart = local;
+        SelectionRect.IsVisible = false;
         e.Pointer.Capture(img);
     }
 
     private void OnPagePointerMoved(object? sender, PointerEventArgs e)
     {
-        // No live-highlight during drag in v0.5.0 — repainting the
-        // bitmap on every mouse move would burn 50–100 ms per event.
-        // Future PR can add a Canvas overlay for live feedback.
-        _ = sender; _ = e;
+        if (sender is not Image img) return;
+        if (_selectionStart is not { } start) return;
+        var cur = e.GetPosition(img);
+        double x = Math.Min(start.X, cur.X);
+        double y = Math.Min(start.Y, cur.Y);
+        double w = Math.Abs(cur.X - start.X);
+        double h = Math.Abs(cur.Y - start.Y);
+        Canvas.SetLeft(SelectionRect, x);
+        Canvas.SetTop(SelectionRect, y);
+        SelectionRect.Width = w;
+        SelectionRect.Height = h;
+        SelectionRect.IsVisible = w > 1 || h > 1;
     }
 
     private async void OnPagePointerReleased(object? sender, PointerReleasedEventArgs e)
     {
         if (sender is not Image img) return;
-        if (_selectionAnchor is not { } anchor) return;
+        if (_selectionStart is not { } start) return;
         e.Pointer.Capture(null);
+        SelectionRect.IsVisible = false;
         try
         {
-            var end = ToPagePoint(img, e);
-            if (end is null) return;
+            var end = e.GetPosition(img);
+            var anchorPage = LocalToPagePoint(img, start);
+            var endPage = LocalToPagePoint(img, end);
+            if (anchorPage is null || endPage is null) return;
             if (DataContext is not MainViewModel vm) return;
 
             // Compute the selection synchronously inside the
             // user-gesture stack frame so the browser still
             // considers the clipboard write authorised.
-            var selected = vm.GetSelectedText(anchor.X, anchor.Y, end.Value.X, end.Value.Y);
+            var selected = vm.GetSelectedText(
+                anchorPage.Value.X, anchorPage.Value.Y,
+                endPage.Value.X, endPage.Value.Y);
 
             bool clipboardOk = false;
             if (!string.IsNullOrEmpty(selected))
@@ -62,7 +81,7 @@ public partial class MainView : UserControl
         }
         finally
         {
-            _selectionAnchor = null;
+            _selectionStart = null;
         }
     }
 
@@ -99,7 +118,7 @@ public partial class MainView : UserControl
     }
 
     /// <summary>
-    /// Maps a pointer event on the <see cref="Image"/> control to a
+    /// Maps a pointer position on the <see cref="Image"/> control to a
     /// page-point coordinate. Handles the two layered scales:
     /// <list type="number">
     ///   <item>image-local → bitmap-pixel via the Stretch=Uniform display
@@ -107,7 +126,7 @@ public partial class MainView : UserControl
     ///   <item>bitmap-pixel → page-point via <c>1 / VM.RenderScale</c>.</item>
     /// </list>
     /// </summary>
-    private static (double X, double Y)? ToPagePoint(Image img, PointerEventArgs e)
+    private static (double X, double Y)? LocalToPagePoint(Image img, Point local)
     {
         if (img.Source is not Bitmap bmp || img.Bounds.Width <= 0 || img.Bounds.Height <= 0)
             return null;
@@ -118,7 +137,7 @@ public partial class MainView : UserControl
         // bitmap's natural size scaled by the smaller of two ratios.
         double scaleX = img.Bounds.Width  / bmp.PixelSize.Width;
         double scaleY = img.Bounds.Height / bmp.PixelSize.Height;
-        double scale  = System.Math.Min(scaleX, scaleY);
+        double scale  = Math.Min(scaleX, scaleY);
         if (scale <= 0) return null;
         // Don't upscale (StretchDirection=DownOnly) — clamp to 1.
         if (scale > 1) scale = 1;
@@ -130,9 +149,8 @@ public partial class MainView : UserControl
         double offsetX = (img.Bounds.Width  - displayedW) / 2.0;
         double offsetY = (img.Bounds.Height - displayedH) / 2.0;
 
-        var pos = e.GetPosition(img);
-        double bitmapX = (pos.X - offsetX) / scale;
-        double bitmapY = (pos.Y - offsetY) / scale;
+        double bitmapX = (local.X - offsetX) / scale;
+        double bitmapY = (local.Y - offsetY) / scale;
         if (bitmapX < 0 || bitmapY < 0 ||
             bitmapX > bmp.PixelSize.Width || bitmapY > bmp.PixelSize.Height)
             return null;

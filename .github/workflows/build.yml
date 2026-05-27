@@ -39,7 +39,12 @@ jobs:
         run: dotnet test tests/RailReaderLite.Tests -c Release --no-build --logger "console;verbosity=detailed"
 
       - name: Publish browser bundle
-        run: dotnet publish src/RailReaderLite.Browser -c Release -o dist/ --no-build
+        # No `--no-build`: the WASM publish pipeline pulls in extra
+        # targets that re-invoke Build on the shared lib, which trips
+        # NETSDK1085 ("NoBuild was true but Build target was invoked").
+        # Cost is ~30s of redundant build; cheaper than maintaining a
+        # workaround.
+        run: dotnet publish src/RailReaderLite.Browser -c Release -o dist/ --no-restore
 
       - name: Upload bundle
         uses: actions/upload-artifact@v7
