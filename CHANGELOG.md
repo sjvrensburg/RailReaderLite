@@ -1,5 +1,105 @@
 # Changelog
 
+## 0.6.0
+
+Rail mode lands — the headline feature for the v0.x series. The page
+is segmented into blocks via PdfPig's real
+`DocstrumBoundingBoxes` (word-aware, column-friendly), reading order
+is assigned by `XYCutPlusPlusResolver` (from Core), and each block
+already carries its `TextLines` from PdfPig — no inline char-cluster
+detection needed. When the user zooms past 1.4× the arrow keys
+lock onto lines.
+
+### Added
+
+- **`LitePdfPigSession`.** A per-document session that owns a cached
+  `PdfPig.PdfDocument` and exposes (a) per-page text + char boxes
+  for search and drag-to-copy, (b) per-page Docstrum blocks for rail
+  mode. Replaces the previous design where
+  `RailReader.Core.PdfPig.PdfTextService` re-opened the document on
+  every call — which was the main source of v1's sluggishness — and
+  the charbox-only Docstrum approximation in Core, which lacked the
+  word-aware horizontal-gap detection needed to separate columns.
+- **Background analysis pipeline.** `EnsurePageAnalysisAsync` runs
+  the per-page word extraction + Docstrum on `Task.Run`; concurrent
+  callers for the same page share one in-flight task. The result is
+  inserted into the cache on the UI thread (async-continuation
+  default), and property-changed events fire so the View lights up
+  rail mode. Pre-warmed on zoom-crosses-threshold and page-nav at
+  high zoom so the user's first ↓/↑ is usually instant.
+- **Rail-mode UI loop.** ↑ / ↓ / ← / → all advance line-by-line in
+  reading order (cascade across blocks/pages on bounds); Home / End
+  jump to first/last line of the current page. Status bar shows
+  `Block i/N · Line j/M` while rail mode is active. Block-scoped
+  commands (`RailNextBlock` / `RailPrevBlock` / `RailFirstLineOfBlock`
+  / `RailLastLineOfBlock`) live on the VM unbound — pencilled in for
+  future "skip section" gestures.
+- **Smart rail entry.** On the first rail-mode keystroke, the VM
+  picks the block + line nearest the *current viewport top* rather
+  than block[0] line[0]. Lets the user zoom into the middle of a
+  page, hit ↓, and pick up reading from where they are instead of
+  snapping to the top of the page.
+- **Render coalescing.** Holding `Ctrl+=` no longer queues a separate
+  full re-render per keystroke — concurrent render requests collapse
+  to one in-flight render with a re-run after if the zoom changed
+  during the work. Pretty noticeable on dense academic pages where a
+  single render at 3× takes a few hundred ms in WASM.
+
+- **Active block + active line overlay.** Drawn on the same Canvas
+  that already hosts the drag-selection rect — a translucent yellow
+  fill for the active line, a 2-px blue outline for the active
+  block. Auto-scroll via `BringIntoView` keeps the active line in
+  the viewport as you advance.
+
+### Changed
+
+- **`MaxZoom` 3.0 → 4.0** (6400 px longest edge, ~85 MB peak RGB
+  buffer for a square page). Picked because 3× felt capped on
+  half-page figures in two-column papers. If WASM memory pressure
+  becomes a problem we can tune down.
+- Direct reference to `RailReader.Core.PdfPig` dropped — it's still
+  available transitively via the renderer; Lite no longer uses
+  `PdfTextService` directly because the session reuses one cached
+  `PdfDocument` for everything. Core family stays at 0.7.3 — the
+  0.8.0 Docstrum analyzer we drafted in `feat/docstrum-analyzer` on
+  the Core repo ended up unused after we pivoted to PdfPig's
+  word-aware DLA inside the session.
+
+### Caveats
+
+- Docstrum classifies every block as `BlockRole.Text` — figures,
+  tables, equations, headings, footnotes all collapse into one role.
+  Rail mode therefore steps through *all* visual regions as if they
+  were paragraphs. Fine for text-heavy academic PDFs (the Lite
+  sweet spot); painful on layout-heavy documents. An ONNX-classified
+  analyzer would do better but doesn't fit Lite's WASM weight budget.
+- The active-line overlay clips strictly to the line's extracted
+  bounding box. On justified text with tall ascenders/descenders it
+  can look snug; we'll tune the height padding once we've used it
+  on real documents for a while.
+- v1 jumps the viewport to the active line via `BringIntoView` — no
+  cubic ease-out snap like the desktop app. That's intentional for
+  the MVP; an animated transition is a future PR.
+
+### Tests
+
+- New VM test: rail mode is off in the empty state and stays off when
+  zoom is pushed past the threshold without a document loaded;
+  rail-nav commands are correctly disabled. Total **9 / 9** pass.
+
+### Performance caveat
+
+Honest assessment: PdfPig + SkiaSharp in single-threaded WASM is
+structurally slow compared to native PDF viewers — parsing is
+pure-managed C# with no JIT in the browser, and rasterisation is
+software-only with no GPU compositing. This release squeezes what
+it can out of that stack (cached `PdfDocument`, background analysis,
+render coalescing), but rail mode at 3–4× zoom on dense academic
+pages still feels sluggish next to the desktop app. v0.7.0 swaps
+the rendering + parsing backend to PDF.js (which runs in a Web
+Worker and uses hardware-accelerated Canvas2D) to fix this
+structurally.
+
 ## 0.5.4
 
 The first half of the rail-mode prerequisite work. Manual zoom only —

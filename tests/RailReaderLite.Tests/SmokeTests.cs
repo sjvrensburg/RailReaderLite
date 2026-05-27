@@ -101,6 +101,30 @@ public class SmokeTests
     }
 
     [Fact]
+    public void RailMode_is_off_in_empty_state_and_when_zoom_is_below_threshold()
+    {
+        // 0.6.0+: rail mode is gated on (HasDocument && Zoom > 1.4 &&
+        // analysed page has blocks). Empty VM never satisfies the
+        // analysis half — IsRailMode must be false and the rail-nav
+        // commands must be disabled.
+        var vm = new MainViewModel();
+        Assert.False(vm.IsRailMode);
+        Assert.False(vm.RailNextLineCommand.CanExecute(null));
+        Assert.False(vm.RailPrevLineCommand.CanExecute(null));
+        Assert.Equal(-1, vm.CurrentBlockIndex);
+        Assert.Equal(-1, vm.CurrentLineIndex);
+        Assert.Null(vm.ActiveBlockBoundsPagePoints);
+        Assert.Null(vm.ActiveLineBoundsPagePoints);
+        Assert.Equal("", vm.RailStatus);
+
+        // Cranking the zoom past the threshold without a document
+        // doesn't engage rail mode.
+        vm.Zoom = 2.0;
+        Assert.False(vm.IsRailMode);
+        Assert.False(vm.RailNextLineCommand.CanExecute(null));
+    }
+
+    [Fact]
     public void Zoom_clamps_to_range_and_flips_stretch_above_1()
     {
         // Direct mutation of Zoom: out-of-range values clamp to
@@ -116,7 +140,7 @@ public class SmokeTests
         Assert.Equal(Avalonia.Media.Stretch.None, vm.ImageStretch);
 
         vm.Zoom = 10.0;
-        Assert.Equal(3.0, vm.Zoom);  // clamped to MaxZoom
+        Assert.Equal(4.0, vm.Zoom);  // clamped to MaxZoom
 
         vm.Zoom = 0.1;
         Assert.Equal(1.0, vm.Zoom);  // clamped to MinZoom

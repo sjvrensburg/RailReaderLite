@@ -12,9 +12,9 @@ using Avalonia.Platform.Storage;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using RailReader.Core.Models;
-using RailReader.Core.PdfPig;
 using RailReader.Core.Services;
 using RailReader.Renderer.PdfPigSkia;
+using RailReaderLite.Services;
 
 namespace RailReaderLite.ViewModels;
 
@@ -30,7 +30,7 @@ public partial class MainViewModel : ViewModelBase
     private const int BaseRenderTargetSize = 1600;
 
     private const double MinZoom = 1.0;
-    private const double MaxZoom = 3.0;
+    private const double MaxZoom = 4.0;
     private const double ZoomStep = 1.25;
 
     private const byte HighlightCurrentMatchR = 255;
@@ -43,8 +43,34 @@ public partial class MainViewModel : ViewModelBase
     private const byte HighlightSelectionG   = 180;
     private const byte HighlightSelectionB   = 255;
 
+    /// <summary>Zoom level at which rail mode auto-engages. Below this
+    /// the page is meant to be read as a whole; above it the user is
+    /// already magnified into a chunk of the page and benefits from
+    /// line-by-line locked navigation.</summary>
+    private const double RailModeZoomThreshold = 1.4;
+
     private IPdfService? _pdf;
-    private readonly IPdfTextService _textService = new PdfTextService();
+
+    /// <summary>Shared PdfPig session that owns the cached
+    /// <c>PdfDocument</c> — feeds both per-page text extraction
+    /// (search + drag-to-copy) and per-page block segmentation
+    /// (rail mode). Replaces the previous design where text
+    /// extraction re-opened the document on every call and rail
+    /// analysis ran on a Core charbox-only Docstrum analyzer that
+    /// wasn't column-aware. See
+    /// <see cref="LitePdfPigSession"/> for the rationale.</summary>
+    private LitePdfPigSession? _session;
+
+    private readonly IReadingOrderResolver _resolver = new XYCutPlusPlusResolver();
+
+    /// <summary>Per-page analysis result cache. Blocks are stored in
+    /// reading order with their <c>Lines</c> populated.</summary>
+    private readonly Dictionary<int, PageAnalysis> _analysisCache = new();
+
+    /// <summary>Tracks in-flight background analysis tasks per page so
+    /// concurrent callers (zoom-cross trigger + first ↓ press) reuse
+    /// the same Task instead of computing twice.</summary>
+    private readonly Dictionary<int, Task<PageAnalysis>> _pendingAnalysis = new();
 
     /// <summary>Lazy per-page text cache. PdfPig.ExtractPageText re-opens
     /// the document on each call (Core.PdfPig.PdfTextService doesn't yet
@@ -62,8 +88,20 @@ public partial class MainViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(PageLabel))]
     [NotifyPropertyChangedFor(nameof(CanPrev))]
     [NotifyPropertyChangedFor(nameof(CanNext))]
+    [NotifyPropertyChangedFor(nameof(IsRailMode))]
+    [NotifyPropertyChangedFor(nameof(RailStatus))]
+    [NotifyPropertyChangedFor(nameof(ActiveBlockBoundsPagePoints))]
+    [NotifyPropertyChangedFor(nameof(ActiveLineBoundsPagePoints))]
     [NotifyCanExecuteChangedFor(nameof(PrevCommand))]
     [NotifyCanExecuteChangedFor(nameof(NextCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailNextLineCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailPrevLineCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailNextBlockCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailPrevBlockCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailFirstLineOfBlockCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailLastLineOfBlockCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailFirstLineOfPageCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailLastLineOfPageCommand))]
     private int _currentPage;
 
     [ObservableProperty]
@@ -94,10 +132,83 @@ public partial class MainViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(ImageStretch))]
     [NotifyPropertyChangedFor(nameof(ImageStretchDirection))]
     [NotifyPropertyChangedFor(nameof(ZoomPercent))]
+    [NotifyPropertyChangedFor(nameof(IsRailMode))]
+    [NotifyPropertyChangedFor(nameof(RailStatus))]
     [NotifyCanExecuteChangedFor(nameof(ZoomInCommand))]
     [NotifyCanExecuteChangedFor(nameof(ZoomOutCommand))]
     [NotifyCanExecuteChangedFor(nameof(ZoomResetCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailNextLineCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailPrevLineCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailNextBlockCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailPrevBlockCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailFirstLineOfBlockCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailLastLineOfBlockCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailFirstLineOfPageCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RailLastLineOfPageCommand))]
     private double _zoom = 1.0;
+
+    /// <summary>Active block index within the current page's analysis,
+    /// or -1 when rail mode hasn't been entered yet (or the page has no
+    /// analysed blocks).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ActiveBlockBoundsPagePoints))]
+    [NotifyPropertyChangedFor(nameof(ActiveLineBoundsPagePoints))]
+    [NotifyPropertyChangedFor(nameof(RailStatus))]
+    private int _currentBlockIndex = -1;
+
+    /// <summary>Active line index within the current block.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ActiveLineBoundsPagePoints))]
+    [NotifyPropertyChangedFor(nameof(RailStatus))]
+    private int _currentLineIndex = -1;
+
+    /// <summary>True when manual zoom has crossed the rail-mode threshold
+    /// AND the current page has been analysed and contains at least one
+    /// block. The View binds the overlay visibility + arrow-key intercept
+    /// to this.</summary>
+    public bool IsRailMode =>
+        HasDocument && Zoom > RailModeZoomThreshold &&
+        _analysisCache.TryGetValue(CurrentPage, out var a) && a.Blocks.Count > 0;
+
+    public string RailStatus
+    {
+        get
+        {
+            if (!IsRailMode) return "";
+            if (!_analysisCache.TryGetValue(CurrentPage, out var a)) return "";
+            if (CurrentBlockIndex < 0) return $"Rail ready · {a.Blocks.Count} blocks";
+            var block = a.Blocks[CurrentBlockIndex];
+            return $"Block {CurrentBlockIndex + 1}/{a.Blocks.Count} · Line {CurrentLineIndex + 1}/{block.Lines.Count}";
+        }
+    }
+
+    public RectF? ActiveBlockBoundsPagePoints
+    {
+        get
+        {
+            if (CurrentBlockIndex < 0) return null;
+            if (!_analysisCache.TryGetValue(CurrentPage, out var a)) return null;
+            if (CurrentBlockIndex >= a.Blocks.Count) return null;
+            var b = a.Blocks[CurrentBlockIndex].BBox;
+            return new RectF(b.X, b.Y, b.X + b.W, b.Y + b.H);
+        }
+    }
+
+    public RectF? ActiveLineBoundsPagePoints
+    {
+        get
+        {
+            if (CurrentBlockIndex < 0 || CurrentLineIndex < 0) return null;
+            if (!_analysisCache.TryGetValue(CurrentPage, out var a)) return null;
+            if (CurrentBlockIndex >= a.Blocks.Count) return null;
+            var block = a.Blocks[CurrentBlockIndex];
+            if (CurrentLineIndex >= block.Lines.Count) return null;
+            var line = block.Lines[CurrentLineIndex];
+            float top = line.Y - line.Height * 0.5f;
+            float bottom = line.Y + line.Height * 0.5f;
+            return new RectF(block.BBox.X, top, block.BBox.X + block.BBox.W, bottom);
+        }
+    }
 
     public Stretch ImageStretch =>
         Zoom <= MinZoom + 1e-3 ? Stretch.Uniform : Stretch.None;
@@ -200,14 +311,20 @@ public partial class MainViewModel : ViewModelBase
             var bytes = memory.ToArray();
 
             if (_pdf is IDisposable disposable) disposable.Dispose();
+            _session?.Dispose();
 
             _pdf = new PdfPigSkiaPdfService(bytes);
+            _session = new LitePdfPigSession(bytes);
             PageCount = _pdf.PageCount;
             CurrentPage = 0;
             Outline = _pdf.Outline;
             OutlineVisible = Outline.Count > 0;
             StatusText = files[0].Name;
             _pageTextCache.Clear();
+            _analysisCache.Clear();
+            _pendingAnalysis.Clear();
+            CurrentBlockIndex = -1;
+            CurrentLineIndex = -1;
             ClearSearchHits();
             await RenderCurrentPageAsync();
         }
@@ -253,6 +370,183 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand(CanExecute = nameof(CanZoomReset))]
     private void ZoomReset() => Zoom = 1.0;
 
+    /// <summary>Rail-mode is eligible to take key events when the user is
+    /// magnified past the threshold AND the current page yields blocks.
+    /// We allow the command to be invoked even when no active line is
+    /// set yet — the first invocation enters rail mode at block 0 /
+    /// line 0.</summary>
+    private bool CanRailNav() =>
+        HasDocument && Zoom > RailModeZoomThreshold;
+
+    [RelayCommand(CanExecute = nameof(CanRailNav))]
+    private async Task RailNextLineAsync()
+    {
+        var analysis = await EnsurePageAnalysisAsync(CurrentPage);
+        if (analysis.Blocks.Count == 0) return;
+
+        if (CurrentBlockIndex < 0)
+        {
+            // Default entry — View should have already called
+            // EnterRailModeNearPageY before this fires; if it didn't
+            // (analysis still pending at View's call), fall back to
+            // top-of-page in reading order.
+            CurrentBlockIndex = 0;
+            CurrentLineIndex = 0;
+            return;
+        }
+
+        var block = analysis.Blocks[CurrentBlockIndex];
+        if (CurrentLineIndex < block.Lines.Count - 1)
+        {
+            CurrentLineIndex++;
+        }
+        else if (CurrentBlockIndex < analysis.Blocks.Count - 1)
+        {
+            CurrentBlockIndex++;
+            CurrentLineIndex = 0;
+        }
+        else if (CanNext)
+        {
+            // Advance to next page, top-of-page-in-reading-order. The
+            // analysis for the new page may not be ready yet —
+            // EnsurePageAnalysisAsync handles the wait.
+            await NextAsync();
+            var newAnalysis = await EnsurePageAnalysisAsync(CurrentPage);
+            if (newAnalysis.Blocks.Count > 0)
+            {
+                CurrentBlockIndex = 0;
+                CurrentLineIndex = 0;
+            }
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRailNav))]
+    private async Task RailNextBlockAsync()
+    {
+        var analysis = await EnsurePageAnalysisAsync(CurrentPage);
+        if (analysis.Blocks.Count == 0) return;
+        if (CurrentBlockIndex < 0) { CurrentBlockIndex = 0; CurrentLineIndex = 0; return; }
+
+        if (CurrentBlockIndex < analysis.Blocks.Count - 1)
+        {
+            CurrentBlockIndex++;
+            CurrentLineIndex = 0;
+        }
+        else if (CanNext)
+        {
+            await NextAsync();
+            var newAnalysis = await EnsurePageAnalysisAsync(CurrentPage);
+            if (newAnalysis.Blocks.Count > 0)
+            {
+                CurrentBlockIndex = 0;
+                CurrentLineIndex = 0;
+            }
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRailNav))]
+    private async Task RailPrevBlockAsync()
+    {
+        var analysis = await EnsurePageAnalysisAsync(CurrentPage);
+        if (analysis.Blocks.Count == 0) return;
+        if (CurrentBlockIndex < 0) { CurrentBlockIndex = 0; CurrentLineIndex = 0; return; }
+
+        if (CurrentBlockIndex > 0)
+        {
+            CurrentBlockIndex--;
+            CurrentLineIndex = 0;
+        }
+        else if (CanPrev)
+        {
+            await PrevAsync();
+            var newAnalysis = await EnsurePageAnalysisAsync(CurrentPage);
+            if (newAnalysis.Blocks.Count > 0)
+            {
+                CurrentBlockIndex = newAnalysis.Blocks.Count - 1;
+                CurrentLineIndex = 0;
+            }
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRailNav))]
+    private async Task RailFirstLineOfBlockAsync()
+    {
+        var analysis = await EnsurePageAnalysisAsync(CurrentPage);
+        if (analysis.Blocks.Count == 0) return;
+        if (CurrentBlockIndex < 0) { CurrentBlockIndex = 0; CurrentLineIndex = 0; return; }
+        CurrentLineIndex = 0;
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRailNav))]
+    private async Task RailLastLineOfBlockAsync()
+    {
+        var analysis = await EnsurePageAnalysisAsync(CurrentPage);
+        if (analysis.Blocks.Count == 0) return;
+        if (CurrentBlockIndex < 0)
+        {
+            CurrentBlockIndex = 0;
+            CurrentLineIndex = Math.Max(0, analysis.Blocks[0].Lines.Count - 1);
+            return;
+        }
+        var block = analysis.Blocks[CurrentBlockIndex];
+        CurrentLineIndex = Math.Max(0, block.Lines.Count - 1);
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRailNav))]
+    private async Task RailFirstLineOfPageAsync()
+    {
+        var analysis = await EnsurePageAnalysisAsync(CurrentPage);
+        if (analysis.Blocks.Count == 0) return;
+        CurrentBlockIndex = 0;
+        CurrentLineIndex = 0;
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRailNav))]
+    private async Task RailLastLineOfPageAsync()
+    {
+        var analysis = await EnsurePageAnalysisAsync(CurrentPage);
+        if (analysis.Blocks.Count == 0) return;
+        CurrentBlockIndex = analysis.Blocks.Count - 1;
+        var last = analysis.Blocks[CurrentBlockIndex];
+        CurrentLineIndex = Math.Max(0, last.Lines.Count - 1);
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRailNav))]
+    private async Task RailPrevLineAsync()
+    {
+        var analysis = await EnsurePageAnalysisAsync(CurrentPage);
+        if (analysis.Blocks.Count == 0) return;
+
+        if (CurrentBlockIndex < 0)
+        {
+            CurrentBlockIndex = 0;
+            CurrentLineIndex = 0;
+            return;
+        }
+
+        if (CurrentLineIndex > 0)
+        {
+            CurrentLineIndex--;
+        }
+        else if (CurrentBlockIndex > 0)
+        {
+            CurrentBlockIndex--;
+            var prev = analysis.Blocks[CurrentBlockIndex];
+            CurrentLineIndex = Math.Max(0, prev.Lines.Count - 1);
+        }
+        else if (CanPrev)
+        {
+            await PrevAsync();
+            var newAnalysis = await EnsurePageAnalysisAsync(CurrentPage);
+            if (newAnalysis.Blocks.Count > 0)
+            {
+                CurrentBlockIndex = newAnalysis.Blocks.Count - 1;
+                var lastBlock = newAnalysis.Blocks[CurrentBlockIndex];
+                CurrentLineIndex = Math.Max(0, lastBlock.Lines.Count - 1);
+            }
+        }
+    }
+
     /// <summary>Source-generated hook on <see cref="Zoom"/> changes —
     /// clamp to range, then re-render the current page so the bitmap
     /// matches the new <see cref="EffectiveRenderTargetSize"/>.</summary>
@@ -265,6 +559,28 @@ public partial class MainViewModel : ViewModelBase
             return;  // setter re-entry will trigger render
         }
         if (HasDocument) _ = RenderCurrentPageAsync();
+        // Eagerly analyse on a background thread when crossing into
+        // rail-eligible zoom — by the time the user presses ↓ the
+        // result is usually already cached. PdfPig's word extraction +
+        // Docstrum is heavy enough to feel sluggish if it runs on the
+        // UI thread on first key press.
+        if (HasDocument && Zoom > RailModeZoomThreshold)
+            _ = EnsurePageAnalysisAsync(CurrentPage);
+    }
+
+    /// <summary>Source-generated hook on <see cref="CurrentPage"/>
+    /// changes — clear the rail-mode cursor so the new page starts
+    /// fresh. PrevAsync / NextAsync mutate CurrentPage directly, so we
+    /// centralise the reset here.</summary>
+    partial void OnCurrentPageChanged(int value)
+    {
+        CurrentBlockIndex = -1;
+        CurrentLineIndex = -1;
+        // Pre-warm analysis on the new page if we're already in
+        // rail-eligible zoom. Background — IsRailMode will flip true
+        // once the result lands.
+    if (HasDocument && Zoom > RailModeZoomThreshold)
+            _ = EnsurePageAnalysisAsync(value);
     }
 
     private bool CanSearch() => HasDocument && !string.IsNullOrWhiteSpace(SearchQuery);
@@ -410,16 +726,141 @@ public partial class MainViewModel : ViewModelBase
         if (zeroBasedPage < 0 || zeroBasedPage >= PageCount) return;
         if (zeroBasedPage == CurrentPage) return;
         CurrentPage = zeroBasedPage;
+        // Reset rail position so the new page starts fresh — the user's
+        // next ↓/↑ re-enters at top/bottom of the new page in reading
+        // order (see RailNextLineAsync / RailPrevLineAsync).
+        CurrentBlockIndex = -1;
+        CurrentLineIndex = -1;
         await RenderCurrentPageAsync();
     }
 
     private PageText GetOrExtractPageText(int pageIndex)
     {
         if (_pageTextCache.TryGetValue(pageIndex, out var cached)) return cached;
-        if (_pdf is null) return new PageText("", []);
-        var extracted = _textService.ExtractPageText(_pdf.PdfBytes, pageIndex);
+        if (_session is null) return new PageText("", []);
+        var extracted = _session.GetPageText(pageIndex);
         _pageTextCache[pageIndex] = extracted;
         return extracted;
+    }
+
+    /// <summary>
+    /// Ensures the requested page's layout analysis is computed and
+    /// cached, returning the result. The actual segmentation runs on
+    /// a background <see cref="Task"/> so the UI thread isn't blocked
+    /// — important because PdfPig's <see cref="DocstrumBoundingBoxes"/>
+    /// takes meaningful time on dense academic pages and was the main
+    /// source of the v0.6.0 sluggishness. Concurrent callers for the
+    /// same page share one in-flight task via
+    /// <see cref="_pendingAnalysis"/>. The result is inserted into
+    /// <see cref="_analysisCache"/> on the UI thread (the implicit
+    /// async continuation captures the Avalonia
+    /// <see cref="System.Threading.SynchronizationContext"/>), and
+    /// property-changed events fire so the View can light up
+    /// rail mode.
+    /// </summary>
+    private async Task<PageAnalysis> EnsurePageAnalysisAsync(int pageIndex)
+    {
+        if (_analysisCache.TryGetValue(pageIndex, out var cached)) return cached;
+        if (_pendingAnalysis.TryGetValue(pageIndex, out var pending)) return await pending;
+        if (_session is null) return new PageAnalysis { Blocks = [], PageWidth = 0, PageHeight = 0 };
+
+        var session = _session;
+        var resolver = _resolver;
+        var task = Task.Run(() =>
+        {
+            var (w, h) = session.GetPageSize(pageIndex);
+            var blocks = session.GetBlocks(pageIndex);
+            resolver.AssignOrder(blocks, w, h);
+            blocks.Sort((a, b) => a.Order.CompareTo(b.Order));
+            return new PageAnalysis { Blocks = blocks, PageWidth = w, PageHeight = h };
+        });
+        _pendingAnalysis[pageIndex] = task;
+
+        PageAnalysis result;
+        try
+        {
+            result = await task;
+        }
+        catch (Exception ex)
+        {
+            _pendingAnalysis.Remove(pageIndex);
+            StatusText = $"Analysis failed for page {pageIndex + 1}: {ex.Message}";
+            return new PageAnalysis { Blocks = [], PageWidth = 0, PageHeight = 0 };
+        }
+
+        _analysisCache[pageIndex] = result;
+        _pendingAnalysis.Remove(pageIndex);
+
+        if (pageIndex == CurrentPage)
+        {
+            OnPropertyChanged(nameof(IsRailMode));
+            OnPropertyChanged(nameof(RailStatus));
+            OnPropertyChanged(nameof(ActiveBlockBoundsPagePoints));
+            OnPropertyChanged(nameof(ActiveLineBoundsPagePoints));
+            RailNextLineCommand.NotifyCanExecuteChanged();
+            RailPrevLineCommand.NotifyCanExecuteChanged();
+            RailNextBlockCommand.NotifyCanExecuteChanged();
+            RailPrevBlockCommand.NotifyCanExecuteChanged();
+            RailFirstLineOfBlockCommand.NotifyCanExecuteChanged();
+            RailLastLineOfBlockCommand.NotifyCanExecuteChanged();
+            RailFirstLineOfPageCommand.NotifyCanExecuteChanged();
+            RailLastLineOfPageCommand.NotifyCanExecuteChanged();
+        }
+        return result;
+    }
+
+    /// <summary>Cache-only lookup — used by the rail-nav commands when
+    /// the active block / line bounds need to be read but the
+    /// background analysis may not have completed yet.</summary>
+    private PageAnalysis? TryGetCachedAnalysis(int pageIndex) =>
+        _analysisCache.TryGetValue(pageIndex, out var a) ? a : null;
+
+    /// <summary>
+    /// Called by the View on the user's first rail-mode keystroke so
+    /// rail mode enters near where the user is looking, not at the top
+    /// of the page. <paramref name="pageY"/> is the page-point Y of the
+    /// top of the current viewport; we pick the block whose vertical
+    /// extent contains (or is closest to) that Y, then the line within
+    /// the block whose centre is nearest. If the analysis isn't ready
+    /// yet this is a no-op — the caller falls back to the default
+    /// "start at block[0] line[0]" behaviour by setting the indices
+    /// directly.
+    /// </summary>
+    public void EnterRailModeNearPageY(float pageY)
+    {
+        if (!_analysisCache.TryGetValue(CurrentPage, out var analysis)) return;
+        if (analysis.Blocks.Count == 0) return;
+
+        int bestBlock = 0;
+        float bestBlockDist = float.MaxValue;
+        for (int i = 0; i < analysis.Blocks.Count; i++)
+        {
+            var b = analysis.Blocks[i].BBox;
+            if (pageY >= b.Y && pageY <= b.Y + b.H)
+            {
+                bestBlock = i;
+                bestBlockDist = 0f;
+                break;
+            }
+            float centerY = b.Y + b.H * 0.5f;
+            float dist = Math.Abs(pageY - centerY);
+            if (dist < bestBlockDist) { bestBlockDist = dist; bestBlock = i; }
+        }
+
+        var block = analysis.Blocks[bestBlock];
+        int bestLine = 0;
+        if (block.Lines.Count > 0)
+        {
+            float bestLineDist = float.MaxValue;
+            for (int j = 0; j < block.Lines.Count; j++)
+            {
+                float dist = Math.Abs(block.Lines[j].Y - pageY);
+                if (dist < bestLineDist) { bestLineDist = dist; bestLine = j; }
+            }
+        }
+
+        CurrentBlockIndex = bestBlock;
+        CurrentLineIndex = bestLine;
     }
 
     /// <summary>
@@ -468,7 +909,38 @@ public partial class MainViewModel : ViewModelBase
         return rects;
     }
 
-    private Task RenderCurrentPageAsync()
+    private bool _renderInFlight;
+    private bool _renderQueued;
+
+    /// <summary>
+    /// Re-renders the current page at the effective render target size.
+    /// Concurrent calls coalesce: while one render is running, any
+    /// further request just sets <see cref="_renderQueued"/> and the
+    /// running render re-runs once it finishes. Without this guard,
+    /// holding Ctrl+= would queue full re-renders sequentially and the
+    /// viewport would lag behind the user's zoom level by N renders.
+    /// </summary>
+    private async Task RenderCurrentPageAsync()
+    {
+        if (_pdf is null) return;
+        if (_renderInFlight) { _renderQueued = true; return; }
+        _renderInFlight = true;
+        try
+        {
+            do
+            {
+                _renderQueued = false;
+                await RenderOnceAsync();
+            }
+            while (_renderQueued);
+        }
+        finally
+        {
+            _renderInFlight = false;
+        }
+    }
+
+    private Task RenderOnceAsync()
     {
         if (_pdf is null) return Task.CompletedTask;
         var pdf = _pdf;
