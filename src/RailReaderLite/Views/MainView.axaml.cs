@@ -174,6 +174,27 @@ public partial class MainView : UserControl
         return null;
     }
 
+    /// <summary>
+    /// Ctrl+wheel zooms in/out. We swallow the event in that case so the
+    /// surrounding <c>ScrollViewer</c> doesn't also scroll on the same
+    /// gesture. Plain wheel (no Ctrl) bubbles up to the scroller as
+    /// before.
+    /// </summary>
+    private void OnPagePointerWheelChanged(object? sender, PointerWheelEventArgs e)
+    {
+        if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
+        if (DataContext is not MainViewModel vm) return;
+        if (e.Delta.Y > 0)
+        {
+            if (vm.ZoomInCommand.CanExecute(null)) vm.ZoomInCommand.Execute(null);
+        }
+        else if (e.Delta.Y < 0)
+        {
+            if (vm.ZoomOutCommand.CanExecute(null)) vm.ZoomOutCommand.Execute(null);
+        }
+        e.Handled = true;
+    }
+
     private void OnSearchBoxKeyDown(object? sender, KeyEventArgs e)
     {
         if (DataContext is not MainViewModel vm) return;

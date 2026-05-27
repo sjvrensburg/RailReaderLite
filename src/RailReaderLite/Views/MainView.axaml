@@ -11,6 +11,12 @@
     <vm:MainViewModel />
   </Design.DataContext>
 
+  <UserControl.KeyBindings>
+    <KeyBinding Gesture="Ctrl+OemPlus"  Command="{Binding ZoomInCommand}" />
+    <KeyBinding Gesture="Ctrl+OemMinus" Command="{Binding ZoomOutCommand}" />
+    <KeyBinding Gesture="Ctrl+D0"       Command="{Binding ZoomResetCommand}" />
+  </UserControl.KeyBindings>
+
   <Grid RowDefinitions="Auto,*,Auto">
     <!-- Toolbar -->
     <Border Grid.Row="0" Padding="12,8" Background="{DynamicResource SystemControlBackgroundChromeMediumBrush}">
@@ -32,6 +38,17 @@
                   Command="{Binding ToggleOutlineCommand}"
                   IsVisible="{Binding HasOutline}"
                   ToolTip.Tip="Toggle outline panel" />
+
+          <!-- Zoom controls -->
+          <Border Width="1" Margin="6,0" Background="{DynamicResource SystemControlForegroundBaseLowBrush}" />
+          <Button Content="−" Command="{Binding ZoomOutCommand}"
+                  ToolTip.Tip="Zoom out (Ctrl+−)" MinWidth="32" />
+          <TextBlock Text="{Binding ZoomPercent}" VerticalAlignment="Center"
+                     MinWidth="48" TextAlignment="Center" />
+          <Button Content="＋" Command="{Binding ZoomInCommand}"
+                  ToolTip.Tip="Zoom in (Ctrl+=)" MinWidth="32" />
+          <Button Content="Fit" Command="{Binding ZoomResetCommand}"
+                  ToolTip.Tip="Reset zoom (Ctrl+0)" />
         </StackPanel>
 
         <!-- Search controls -->
@@ -105,12 +122,13 @@
             <Grid HorizontalAlignment="Center" VerticalAlignment="Center" Margin="16">
               <Image x:Name="PageImageView"
                      Source="{Binding PageImage}"
-                     Stretch="Uniform"
-                     StretchDirection="DownOnly"
+                     Stretch="{Binding ImageStretch}"
+                     StretchDirection="{Binding ImageStretchDirection}"
                      Cursor="IBeam"
                      PointerPressed="OnPagePointerPressed"
                      PointerMoved="OnPagePointerMoved"
-                     PointerReleased="OnPagePointerReleased" />
+                     PointerReleased="OnPagePointerReleased"
+                     PointerWheelChanged="OnPagePointerWheelChanged" />
               <Canvas IsHitTestVisible="False" ClipToBounds="True">
                 <Rectangle x:Name="SelectionRect"
                            Fill="#553B82F6"
