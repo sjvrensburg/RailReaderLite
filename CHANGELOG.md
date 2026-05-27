@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.2
+
+### Fixed
+
+- **Drag-to-copy still produced word-glued text on academic PDFs after
+  0.5.1.** The 0.7.2 Core fix used a geometry-based threshold that
+  worked on the SkiaSharp test fixture but mis-fired on Frontiers-style
+  justified typesetting. 0.7.3 in Core switched to PdfPig's purpose-
+  built `NearestNeighbourWordExtractor`; this release picks it up.
+  Multi-word search now matches across word boundaries; drag-to-copy
+  yields readable text.
+
 ## 0.5.1
 
 Two bugs surfaced by trying to actually use the 0.5.0 viewer.
