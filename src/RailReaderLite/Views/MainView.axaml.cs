@@ -1,10 +1,12 @@
 using System;
+using System.ComponentModel;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Media.Imaging;
+using RailReader.Core.Models;
 using RailReaderLite.ViewModels;
 
 namespace RailReaderLite.Views;
@@ -18,9 +20,222 @@ public partial class MainView : UserControl
     /// Null when no drag is active.</summary>
     private Point? _selectionStart;
 
+    private MainViewModel? _subscribedVm;
+
     public MainView()
     {
         InitializeComponent();
+        DataContextChanged += OnDataContextChanged;
+    }
+
+    private void OnDataContextChanged(object? sender, EventArgs e)
+    {
+        if (_subscribedVm is not null)
+            _subscribedVm.PropertyChanged -= OnVmPropertyChanged;
+        _subscribedVm = DataContext as MainViewModel;
+        if (_subscribedVm is not null)
+            _subscribedVm.PropertyChanged += OnVmPropertyChanged;
+        SyncRailOverlay();
+    }
+
+    private void OnVmPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        switch (e.PropertyName)
+        {
+            case nameof(MainViewModel.ActiveBlockBoundsPagePoints):
+            case nameof(MainViewModel.ActiveLineBoundsPagePoints):
+            case nameof(MainViewModel.PageImage):
+            case nameof(MainViewModel.RenderScale):
+            case nameof(MainViewModel.IsRailMode):
+                SyncRailOverlay();
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Pushes the VM's active-block / active-line page-point rects onto
+    /// the Canvas overlay in image-local coords, and scrolls the
+    /// ScrollViewer so the active line stays visible. Called whenever
+    /// the VM signals a change or a new bitmap lands.
+    /// </summary>
+    private void SyncRailOverlay()
+    {
+        if (DataContext is not MainViewModel vm) return;
+
+        if (!vm.IsRailMode)
+        {
+            ActiveBlockRect.IsVisible = false;
+            ActiveLineRect.IsVisible = false;
+            return;
+        }
+
+        var blockRect = PageRectToCanvas(vm.ActiveBlockBoundsPagePoints);
+        if (blockRect is { } b)
+        {
+            Canvas.SetLeft(ActiveBlockRect, b.X);
+            Canvas.SetTop(ActiveBlockRect, b.Y);
+            ActiveBlockRect.Width = b.Width;
+            ActiveBlockRect.Height = b.Height;
+            ActiveBlockRect.IsVisible = true;
+        }
+        else
+        {
+            ActiveBlockRect.IsVisible = false;
+        }
+
+        var lineRect = PageRectToCanvas(vm.ActiveLineBoundsPagePoints);
+        if (lineRect is { } l)
+        {
+            Canvas.SetLeft(ActiveLineRect, l.X);
+            Canvas.SetTop(ActiveLineRect, l.Y);
+            ActiveLineRect.Width = l.Width;
+            ActiveLineRect.Height = l.Height;
+            ActiveLineRect.IsVisible = true;
+            ScrollToCanvasRect(l);
+        }
+        else
+        {
+            ActiveLineRect.IsVisible = false;
+        }
+    }
+
+    /// <summary>
+    /// Maps a page-point rect to the Canvas coordinate system, which
+    /// equals the Image's image-local (control) space because both
+    /// share a Grid cell with the same alignment. Returns null when
+    /// the bitmap isn't loaded yet or the rect is degenerate.
+    /// </summary>
+    private Avalonia.Rect? PageRectToCanvas(RectF? pageRect)
+    {
+        if (pageRect is null) return null;
+        if (PageImageView.Source is not Bitmap bmp) return null;
+        if (DataContext is not MainViewModel vm) return null;
+        if (vm.RenderScale <= 0) return null;
+        if (PageImageView.Bounds.Width <= 0 || PageImageView.Bounds.Height <= 0) return null;
+
+        // Mirror of LocalToPagePoint: page-point → bitmap-pixel →
+        // image-local. With Stretch=None (Zoom > 1), the displayed
+        // scale is 1:1 with bitmap pixels. With Stretch=Uniform/DownOnly
+        // (Zoom == 1), the bitmap is uniformly down-scaled to fit.
+        double scaleX = PageImageView.Bounds.Width  / bmp.PixelSize.Width;
+        double scaleY = PageImageView.Bounds.Height / bmp.PixelSize.Height;
+        double displayScale = Math.Min(scaleX, scaleY);
+        if (displayScale <= 0) return null;
+        if (displayScale > 1) displayScale = 1;
+
+        var pr = pageRect.Value;
+        double bx1 = pr.Left   * vm.RenderScale;
+        double by1 = pr.Top    * vm.RenderScale;
+        double bx2 = pr.Right  * vm.RenderScale;
+        double by2 = pr.Bottom * vm.RenderScale;
+
+        double displayedW = bmp.PixelSize.Width  * displayScale;
+        double displayedH = bmp.PixelSize.Height * displayScale;
+        double offsetX = (PageImageView.Bounds.Width  - displayedW) / 2.0;
+        double offsetY = (PageImageView.Bounds.Height - displayedH) / 2.0;
+
+        double x = bx1 * displayScale + offsetX;
+        double y = by1 * displayScale + offsetY;
+        double w = (bx2 - bx1) * displayScale;
+        double h = (by2 - by1) * displayScale;
+        if (w <= 0 || h <= 0) return null;
+        return new Avalonia.Rect(x, y, w, h);
+    }
+
+    /// <summary>
+    /// Scrolls the surrounding <see cref="ScrollViewer"/> so the active
+    /// line rectangle is fully visible. We let Avalonia's built-in
+    /// <c>BringIntoView</c> walk the visual tree — it handles the
+    /// Canvas → Grid → ScrollViewer translation, including the 16-px
+    /// Grid margin, the centring alignment, and the current zoom.
+    /// </summary>
+    private void ScrollToCanvasRect(Avalonia.Rect canvasRect)
+    {
+        _ = canvasRect;  // rect already pushed onto ActiveLineRect; BringIntoView reads layout
+        // Defer until after the layout pass so the rect's position
+        // reflects the just-set Canvas.Left/Top values.
+        Avalonia.Threading.Dispatcher.UIThread.Post(
+            () => ActiveLineRect.BringIntoView(),
+            Avalonia.Threading.DispatcherPriority.Background);
+    }
+
+    /// <summary>
+    /// Intercepts arrow / Home / End keys at the root when rail mode is
+    /// active so the ScrollViewer's default scrolling doesn't fight the
+    /// line nav. On the user's first rail-mode keystroke we ask the VM
+    /// to enter rail mode near the top of the current viewport — that
+    /// way the user continues reading from where they zoomed in rather
+    /// than jumping to the first line of the page.
+    /// </summary>
+    private void OnRootKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        if (!vm.IsRailMode) return;
+        if (e.Source is TextBox) return;  // don't steal keys from search box
+
+        bool isRailKey = e.Key is Key.Down or Key.Up or Key.Left or Key.Right or Key.Home or Key.End;
+        if (!isRailKey) return;
+
+        // Enter rail mode near the visible region on first keystroke.
+        if (vm.CurrentBlockIndex < 0)
+        {
+            var pageY = ViewportTopInPagePoints(vm);
+            if (pageY is { } y) vm.EnterRailModeNearPageY(y);
+        }
+
+        switch (e.Key)
+        {
+            case Key.Down:
+            case Key.Right:
+                if (vm.RailNextLineCommand.CanExecute(null)) vm.RailNextLineCommand.Execute(null);
+                break;
+            case Key.Up:
+            case Key.Left:
+                if (vm.RailPrevLineCommand.CanExecute(null)) vm.RailPrevLineCommand.Execute(null);
+                break;
+            case Key.Home:
+                if (vm.RailFirstLineOfPageCommand.CanExecute(null))
+                    vm.RailFirstLineOfPageCommand.Execute(null);
+                break;
+            case Key.End:
+                if (vm.RailLastLineOfPageCommand.CanExecute(null))
+                    vm.RailLastLineOfPageCommand.Execute(null);
+                break;
+        }
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Returns the page-point Y at the top of the current viewport, or
+    /// null if the bitmap/render isn't ready yet. Walks the Image's
+    /// top-left through TranslatePoint to ScrollViewer-local coords,
+    /// then inverts the image-local → page-point mapping.
+    /// </summary>
+    private float? ViewportTopInPagePoints(MainViewModel vm)
+    {
+        if (PageImageView.Source is not Bitmap bmp) return null;
+        if (vm.RenderScale <= 0) return null;
+        if (PageImageView.Bounds.Width <= 0 || PageImageView.Bounds.Height <= 0) return null;
+
+        var imageTop = PageImageView.TranslatePoint(new Point(0, 0), PageScroller);
+        if (imageTop is null) return null;
+
+        // ScrollViewer's local (0, 0) is the top of the viewport. The
+        // image-local Y at the top of the viewport is therefore the
+        // negative of the image's Y in ScrollViewer-local coords (when
+        // the image extends above the viewport).
+        double imageLocalY = -imageTop.Value.Y;
+        if (imageLocalY < 0) imageLocalY = 0;
+
+        // image-local → bitmap-pixel inverse of LocalToPagePoint.
+        double scaleX = PageImageView.Bounds.Width  / bmp.PixelSize.Width;
+        double scaleY = PageImageView.Bounds.Height / bmp.PixelSize.Height;
+        double displayScale = Math.Min(scaleX, scaleY);
+        if (displayScale <= 0) return null;
+        if (displayScale > 1) displayScale = 1;
+
+        double bitmapY = imageLocalY / displayScale;
+        return (float)(bitmapY / vm.RenderScale);
     }
 
     private void OnPagePointerPressed(object? sender, PointerPressedEventArgs e)

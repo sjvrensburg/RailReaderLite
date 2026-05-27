@@ -13,7 +13,12 @@
 
         <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.0" />
 
-        <!-- RailReaderCore family — pin tight while we shake out the Lite consumer -->
+        <!-- RailReaderCore family. Core.PdfPig is a transitive dep via
+             Renderer.PdfPigSkia; we no longer need a direct ref because
+             Lite extracts text via its own LitePdfPigSession (cached
+             PdfDocument) and runs DLA via UglyToad.PdfPig directly.
+             Stays on 0.7.3 — the 0.8.0 Docstrum analyzer in Core ended
+             up unused (we use PdfPig's word-aware DLA instead). -->
         <PackageVersion Include="RailReader.Core" Version="0.7.3" />
         <PackageVersion Include="RailReader.Core.PdfPig" Version="0.7.3" />
         <PackageVersion Include="RailReader.Renderer.PdfPigSkia" Version="0.7.3" />
