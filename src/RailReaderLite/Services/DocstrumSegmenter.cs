@@ -139,11 +139,6 @@ public static class DocstrumSegmenter
         float maxWithinAbsolute = (float)(pageW * 0.025f);
         if (maxWithin > maxWithinAbsolute) maxWithin = maxWithinAbsolute;
 
-        System.Console.WriteLine(
-            $"[Docstrum] pageW={pageW:F0} pageH={pageH:F0} medianH={medianH:F2} " +
-            $"withinGap={withinGap:F2} betweenGap={betweenGap:F2} " +
-            $"maxWithin={maxWithin:F2} maxBetween={maxBetween:F2}");
-
         var lines = BuildLines(words, maxWithin, yTolWithin);
 
         // ----- Phase 2: lines → blocks.

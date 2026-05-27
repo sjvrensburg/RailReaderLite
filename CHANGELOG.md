@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.1 — maintenance cleanup
+
+No behaviour change. Pure cleanup pass after the strategic decision
+to freeze Lite and pivot to a native mobile build.
+
+### Removed
+
+- **Dead `ClusterItemsIntoBlocks`** (and its private helpers + the
+  `TextRect` / `LineRect` records) from `PdfJsSession.cs`. The
+  RailDLA-derived `DocstrumSegmenter.Segment` superseded it in
+  v0.8.0; leaving the fallback around was pointless once the port
+  was validated. ~210 lines dropped.
+- **Diagnostic `Console.WriteLine` logging** from
+  `DocstrumSegmenter.cs` and `MainViewModel.cs`. Useful for the
+  column-awareness diagnosis pass but noise in shipped builds.
+
 ## 0.8.0 — final Lite release before the mobile pivot
 
 This is the last planned feature release for the WebAssembly Lite
