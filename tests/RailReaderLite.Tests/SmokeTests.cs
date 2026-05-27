@@ -82,4 +82,44 @@ public class SmokeTests
         Assert.NotNull(factory.CreatePdfTextService());
         Assert.NotNull(factory.CreatePdfLinkService());
     }
+
+    [Fact]
+    public void Zoom_defaults_to_1_and_commands_gate_on_document_state()
+    {
+        // 0.5.3+: manual zoom shape. At construction the page is in fit
+        // mode (Zoom == 1.0 → Stretch.Uniform/DownOnly); zoom commands
+        // are inert until a document is loaded.
+        var vm = new MainViewModel();
+        Assert.Equal(1.0, vm.Zoom);
+        Assert.Equal("100%", vm.ZoomPercent);
+        Assert.Equal(Avalonia.Media.Stretch.Uniform, vm.ImageStretch);
+        Assert.Equal(Avalonia.Media.StretchDirection.DownOnly, vm.ImageStretchDirection);
+
+        Assert.False(vm.ZoomInCommand.CanExecute(null));
+        Assert.False(vm.ZoomOutCommand.CanExecute(null));
+        Assert.False(vm.ZoomResetCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void Zoom_clamps_to_range_and_flips_stretch_above_1()
+    {
+        // Direct mutation of Zoom: out-of-range values clamp to
+        // [MinZoom=1.0, MaxZoom=3.0] inside OnZoomChanged. Above 1.0
+        // the View should switch to Stretch.None so the now-larger
+        // bitmap displays at natural pixel size and the ScrollViewer
+        // scrolls.
+        var vm = new MainViewModel();
+
+        vm.Zoom = 1.5;
+        Assert.Equal(1.5, vm.Zoom);
+        Assert.Equal("150%", vm.ZoomPercent);
+        Assert.Equal(Avalonia.Media.Stretch.None, vm.ImageStretch);
+
+        vm.Zoom = 10.0;
+        Assert.Equal(3.0, vm.Zoom);  // clamped to MaxZoom
+
+        vm.Zoom = 0.1;
+        Assert.Equal(1.0, vm.Zoom);  // clamped to MinZoom
+        Assert.Equal(Avalonia.Media.Stretch.Uniform, vm.ImageStretch);
+    }
 }

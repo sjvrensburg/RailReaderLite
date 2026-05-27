@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Avalonia;
+using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Platform.Storage;
@@ -19,10 +20,18 @@ namespace RailReaderLite.ViewModels;
 
 public partial class MainViewModel : ViewModelBase
 {
-    /// <summary>Longest-edge pixel size used at render time. Re-render this
-    /// many pixels in each direction; the View's Stretch=Uniform/DownOnly
-    /// then scales the result to fit the viewport.</summary>
-    private const int RenderTargetSize = 1600;
+    /// <summary>Longest-edge pixel size at Zoom=1.0. The effective render
+    /// size is <see cref="BaseRenderTargetSize"/> × <see cref="Zoom"/>,
+    /// rendered into the bitmap so the page stays sharp under manual
+    /// zoom. At Zoom=1.0 the View uses Stretch=Uniform/DownOnly so a big
+    /// bitmap shrinks to fit the viewport (current behaviour); above
+    /// 1.0 it switches to Stretch=None so the bitmap is shown at its
+    /// natural pixel size and the ScrollViewer scrolls.</summary>
+    private const int BaseRenderTargetSize = 1600;
+
+    private const double MinZoom = 1.0;
+    private const double MaxZoom = 3.0;
+    private const double ZoomStep = 1.25;
 
     private const byte HighlightCurrentMatchR = 255;
     private const byte HighlightCurrentMatchG = 200;
@@ -44,8 +53,9 @@ public partial class MainViewModel : ViewModelBase
     private readonly Dictionary<int, PageText> _pageTextCache = new();
 
     /// <summary>Search hits across all pages. Each entry is a glyph-rect
-    /// list in bitmap-pixel coordinates (relative to a page rendered at
-    /// <see cref="RenderTargetSize"/>) for one match on one page.</summary>
+    /// list in PAGE-POINT coordinates for one match on one page; the
+    /// render path converts to bitmap pixels using the current
+    /// <see cref="RenderScale"/>.</summary>
     private readonly List<SearchHit> _searchHits = [];
 
     [ObservableProperty]
@@ -65,7 +75,43 @@ public partial class MainViewModel : ViewModelBase
     [NotifyCanExecuteChangedFor(nameof(PrevCommand))]
     [NotifyCanExecuteChangedFor(nameof(NextCommand))]
     [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ZoomInCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ZoomOutCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ZoomResetCommand))]
     private int _pageCount;
+
+    /// <summary>
+    /// Manual zoom factor. 1.0 means "fit to window" (the bitmap is
+    /// rendered at <see cref="BaseRenderTargetSize"/> and the View
+    /// scales it down with Stretch=Uniform/DownOnly). Above 1.0 the
+    /// bitmap is rendered at <c>BaseRenderTargetSize × Zoom</c> pixels
+    /// and the View switches to Stretch=None so it appears at natural
+    /// size and the ScrollViewer scrolls. Capped at <see cref="MaxZoom"/>
+    /// to keep WASM RAM use bounded (3× of 1600 = 4800 px longest edge =
+    /// ~36 MB peak RGB buffer for a square page).
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ImageStretch))]
+    [NotifyPropertyChangedFor(nameof(ImageStretchDirection))]
+    [NotifyPropertyChangedFor(nameof(ZoomPercent))]
+    [NotifyCanExecuteChangedFor(nameof(ZoomInCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ZoomOutCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ZoomResetCommand))]
+    private double _zoom = 1.0;
+
+    public Stretch ImageStretch =>
+        Zoom <= MinZoom + 1e-3 ? Stretch.Uniform : Stretch.None;
+
+    public StretchDirection ImageStretchDirection =>
+        Zoom <= MinZoom + 1e-3 ? StretchDirection.DownOnly : StretchDirection.Both;
+
+    public string ZoomPercent => $"{(int)Math.Round(Zoom * 100)}%";
+
+    /// <summary>Render target longest-edge pixel count under the
+    /// current <see cref="Zoom"/>. <see cref="RenderCurrentPageAsync"/>
+    /// passes this to <c>IPdfService.RenderPagePixmap</c>.</summary>
+    private int EffectiveRenderTargetSize =>
+        (int)Math.Round(BaseRenderTargetSize * Math.Max(1.0, Zoom));
 
     [ObservableProperty]
     private Bitmap? _pageImage;
@@ -193,6 +239,33 @@ public partial class MainViewModel : ViewModelBase
 
     [RelayCommand]
     private void ToggleOutline() => OutlineVisible = !OutlineVisible;
+
+    private bool CanZoomIn() => HasDocument && Zoom < MaxZoom - 1e-3;
+    private bool CanZoomOut() => HasDocument && Zoom > MinZoom + 1e-3;
+    private bool CanZoomReset() => HasDocument;
+
+    [RelayCommand(CanExecute = nameof(CanZoomIn))]
+    private void ZoomIn() => Zoom = Math.Min(MaxZoom, Zoom * ZoomStep);
+
+    [RelayCommand(CanExecute = nameof(CanZoomOut))]
+    private void ZoomOut() => Zoom = Math.Max(MinZoom, Zoom / ZoomStep);
+
+    [RelayCommand(CanExecute = nameof(CanZoomReset))]
+    private void ZoomReset() => Zoom = 1.0;
+
+    /// <summary>Source-generated hook on <see cref="Zoom"/> changes —
+    /// clamp to range, then re-render the current page so the bitmap
+    /// matches the new <see cref="EffectiveRenderTargetSize"/>.</summary>
+    partial void OnZoomChanged(double value)
+    {
+        var clamped = Math.Clamp(value, MinZoom, MaxZoom);
+        if (Math.Abs(clamped - value) > 1e-6)
+        {
+            Zoom = clamped;
+            return;  // setter re-entry will trigger render
+        }
+        if (HasDocument) _ = RenderCurrentPageAsync();
+    }
 
     private bool CanSearch() => HasDocument && !string.IsNullOrWhiteSpace(SearchQuery);
 
@@ -400,6 +473,7 @@ public partial class MainViewModel : ViewModelBase
         if (_pdf is null) return Task.CompletedTask;
         var pdf = _pdf;
         var page = CurrentPage;
+        var targetSize = EffectiveRenderTargetSize;
         var searchHitsForPage = _searchHits.Where(h => h.PageIndex == page).ToList();
         var currentMatch = (CurrentMatchIndex >= 0 && CurrentMatchIndex < _searchHits.Count)
             ? _searchHits[CurrentMatchIndex] : null;
@@ -409,7 +483,7 @@ public partial class MainViewModel : ViewModelBase
             try
             {
                 var (pageW, pageH) = pdf.GetPageSize(page);
-                float scale = (float)(RenderTargetSize / Math.Max(pageW, pageH));
+                float scale = (float)(targetSize / Math.Max(pageW, pageH));
                 Dispatcher.UIThread.Post(() =>
                 {
                     RenderScale = scale;
@@ -417,7 +491,7 @@ public partial class MainViewModel : ViewModelBase
                     CurrentPagePointHeight = pageH;
                 });
 
-                var (rgb, width, height) = pdf.RenderPagePixmap(page, RenderTargetSize);
+                var (rgb, width, height) = pdf.RenderPagePixmap(page, targetSize);
 
                 // Paint highlights INTO the rgb buffer so the View doesn't
                 // need a separate overlay (and so coordinate conversion

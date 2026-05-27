@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.5.4
+
+The first half of the rail-mode prerequisite work. Manual zoom only —
+the actual rail-mode loop (block-lock, line-by-line navigation, active
+block overlay) lands in the follow-up release once `RailReader.Core`
+ships the lightweight Docstrum analyzer.
+
+### Added
+
+- **Manual zoom (1.0×–3.0×).** Toolbar `−` / `＋` / `Fit` buttons,
+  keyboard shortcuts `Ctrl+=`, `Ctrl+−`, `Ctrl+0`, and `Ctrl+Wheel`
+  over the page image. Zoom percentage is shown between the buttons.
+  Cap at 3.0× (~4800 px longest edge, ~36 MB peak RGB buffer) to keep
+  WASM RAM use bounded.
+- **Adaptive `Stretch` mode.** The `Image` binds its `Stretch` and
+  `StretchDirection` to the VM so it switches between two modes:
+  - `Zoom == 1.0`: `Stretch=Uniform` `StretchDirection=DownOnly` —
+    the existing fit-to-window behaviour (bitmap shrinks to viewport
+    when larger).
+  - `Zoom > 1.0`: `Stretch=None` — bitmap displayed at natural pixel
+    size, the surrounding `ScrollViewer` scrolls. Page is rendered
+    at `BaseRenderTargetSize × Zoom` so glyphs stay sharp.
+
+  Known v1 visual glitch: the displayed page size jumps when
+  crossing the 1.0 → 1.25 boundary (fit → natural-pixel). A future
+  PR can smooth this by computing an explicit display size from the
+  viewport bounds, but it needs viewport feedback from the View into
+  the VM and isn't on the rail-mode critical path.
+
+### Tests
+
+- Two new VM tests: zoom defaults to 1.0 and commands gate on
+  `HasDocument`; Zoom clamps to [1.0, 3.0] and flips
+  `ImageStretch` above 1.0. Total **8 / 8** pass.
+
 ## 0.5.3
 
 ### Added
