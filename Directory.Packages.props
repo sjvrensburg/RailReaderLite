@@ -13,15 +13,13 @@
 
         <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.0" />
 
-        <!-- RailReaderCore family. Core.PdfPig is a transitive dep via
-             Renderer.PdfPigSkia; we no longer need a direct ref because
-             Lite extracts text via its own LitePdfPigSession (cached
-             PdfDocument) and runs DLA via UglyToad.PdfPig directly.
-             Stays on 0.7.3 — the 0.8.0 Docstrum analyzer in Core ended
-             up unused (we use PdfPig's word-aware DLA instead). -->
+        <!-- RailReaderCore family. v0.7.0 swapped Lite's PDF backend
+             to PDF.js (Web Worker + GPU Canvas2D), so the PdfPig +
+             SkiaSharp packages are no longer used. Only RailReader.Core
+             stays for LayoutBlock / LineInfo / XYCutPlusPlusResolver
+             — the algorithmic types that the rail-mode loop is built
+             around. -->
         <PackageVersion Include="RailReader.Core" Version="0.7.3" />
-        <PackageVersion Include="RailReader.Core.PdfPig" Version="0.7.3" />
-        <PackageVersion Include="RailReader.Renderer.PdfPigSkia" Version="0.7.3" />
 
         <!-- Test stack -->
         <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />

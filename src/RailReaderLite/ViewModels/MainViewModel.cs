@@ -13,7 +13,6 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using RailReader.Core.Models;
 using RailReader.Core.Services;
-using RailReader.Renderer.PdfPigSkia;
 using RailReaderLite.Services;
 
 namespace RailReaderLite.ViewModels;
@@ -49,17 +48,13 @@ public partial class MainViewModel : ViewModelBase
     /// line-by-line locked navigation.</summary>
     private const double RailModeZoomThreshold = 1.4;
 
-    private IPdfService? _pdf;
-
-    /// <summary>Shared PdfPig session that owns the cached
-    /// <c>PdfDocument</c> — feeds both per-page text extraction
-    /// (search + drag-to-copy) and per-page block segmentation
-    /// (rail mode). Replaces the previous design where text
-    /// extraction re-opened the document on every call and rail
-    /// analysis ran on a Core charbox-only Docstrum analyzer that
-    /// wasn't column-aware. See
-    /// <see cref="LitePdfPigSession"/> for the rationale.</summary>
-    private LitePdfPigSession? _session;
+    /// <summary>PDF.js-backed session. Replaces the previous
+    /// PdfPig+SkiaSharp stack — PDF.js runs in a Web Worker (free
+    /// background thread) and uses hardware-accelerated Canvas2D
+    /// rasterisation, which is what fixes the v0.6.0 sluggishness
+    /// for real. Constructed by the Browser entry point's
+    /// JSInterop layer via <see cref="PdfJsRuntimeRegistry.Current"/>.</summary>
+    private PdfJsSession? _session;
 
     private readonly IReadingOrderResolver _resolver = new XYCutPlusPlusResolver();
 
@@ -71,6 +66,12 @@ public partial class MainViewModel : ViewModelBase
     /// concurrent callers (zoom-cross trigger + first ↓ press) reuse
     /// the same Task instead of computing twice.</summary>
     private readonly Dictionary<int, Task<PageAnalysis>> _pendingAnalysis = new();
+
+    /// <summary>Tracks in-flight page-text extraction tasks. Mirrors
+    /// the analysis cache so drag-to-copy (which must run synchronously
+    /// inside the user-gesture stack frame) doesn't race the render
+    /// pipeline's lazy load.</summary>
+    private readonly Dictionary<int, Task<PageText>> _pendingPageText = new();
 
     /// <summary>Lazy per-page text cache. PdfPig.ExtractPageText re-opens
     /// the document on each call (Core.PdfPig.PdfTextService doesn't yet
@@ -280,7 +281,7 @@ public partial class MainViewModel : ViewModelBase
     }
     private OutlineEntry? _selectedOutlineEntry;
 
-    public bool HasDocument => _pdf is not null && PageCount > 0;
+    public bool HasDocument => _session is not null && PageCount > 0;
     public bool CanPrev => HasDocument && CurrentPage > 0;
     public bool CanNext => HasDocument && CurrentPage < PageCount - 1;
     public bool HasOutline => Outline.Count > 0;
@@ -310,17 +311,20 @@ public partial class MainViewModel : ViewModelBase
             await stream.CopyToAsync(memory);
             var bytes = memory.ToArray();
 
-            if (_pdf is IDisposable disposable) disposable.Dispose();
             _session?.Dispose();
 
-            _pdf = new PdfPigSkiaPdfService(bytes);
-            _session = new LitePdfPigSession(bytes);
-            PageCount = _pdf.PageCount;
+            var runtime = PdfJsRuntimeRegistry.Current
+                ?? throw new InvalidOperationException(
+                    "PDF.js runtime not initialised. Browser entry point should set PdfJsRuntimeRegistry.Current.");
+            _session = await PdfJsSession.OpenAsync(runtime, bytes);
+            PageCount = _session.PageCount;
             CurrentPage = 0;
-            Outline = _pdf.Outline;
+            var rawOutline = await _session.GetOutlineAsync();
+            Outline = ConvertOutline(rawOutline);
             OutlineVisible = Outline.Count > 0;
             StatusText = files[0].Name;
             _pageTextCache.Clear();
+            _pendingPageText.Clear();
             _analysisCache.Clear();
             _pendingAnalysis.Clear();
             CurrentBlockIndex = -1;
@@ -588,16 +592,16 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand(CanExecute = nameof(CanSearch))]
     private async Task SearchAsync()
     {
-        if (_pdf is null) return;
+        if (_session is null) return;
         ClearSearchHits();
         var query = SearchQuery;
 
         // Scan every page for the query. Builds glyph-rect lists in
-        // bitmap-pixel coordinates so the render path can paint them
+        // PAGE-POINT coordinates so the render path can paint them
         // without knowing the search semantics.
         for (int p = 0; p < PageCount; p++)
         {
-            var text = GetOrExtractPageText(p);
+            var text = await EnsurePageTextAsync(p);
             if (text.Text.Length == 0) continue;
 
             int idx = 0;
@@ -692,8 +696,14 @@ public partial class MainViewModel : ViewModelBase
     public string? GetSelectedText(double pageX1, double pageY1, double pageX2, double pageY2)
     {
         if (!HasDocument) return null;
-        var text = GetOrExtractPageText(CurrentPage);
-        if (text.Text.Length == 0) return null;
+        // GetSelectedText runs from the View synchronously inside the
+        // user-gesture frame so the clipboard write is authorised by
+        // the browser. We can't await text extraction here. The render
+        // pipeline pre-fetches PageText after every render, so this
+        // hit is essentially always cached by the time the user
+        // finishes a drag.
+        var text = TryGetCachedPageText(CurrentPage);
+        if (text is null || text.Text.Length == 0) return null;
 
         float l = (float)Math.Min(pageX1, pageX2);
         float r = (float)Math.Max(pageX1, pageX2);
@@ -734,13 +744,51 @@ public partial class MainViewModel : ViewModelBase
         await RenderCurrentPageAsync();
     }
 
-    private PageText GetOrExtractPageText(int pageIndex)
+    /// <summary>Synchronous cache lookup — returns the cached
+    /// <see cref="PageText"/> if it's already been extracted, else
+    /// null. Used by <see cref="GetSelectedText"/> which must run
+    /// synchronously inside the user-gesture stack frame so the
+    /// browser still authorises the clipboard write.</summary>
+    private PageText? TryGetCachedPageText(int pageIndex) =>
+        _pageTextCache.TryGetValue(pageIndex, out var t) ? t : null;
+
+    /// <summary>Async extract-and-cache. The render pipeline kicks
+    /// this off after every page render so by the time the user
+    /// drag-selects, the text is in cache and the sync lookup hits.
+    /// Concurrent callers for the same page share one in-flight
+    /// task via <see cref="_pendingPageText"/>.</summary>
+    private async Task<PageText> EnsurePageTextAsync(int pageIndex)
     {
         if (_pageTextCache.TryGetValue(pageIndex, out var cached)) return cached;
+        if (_pendingPageText.TryGetValue(pageIndex, out var pending)) return await pending;
         if (_session is null) return new PageText("", []);
-        var extracted = _session.GetPageText(pageIndex);
-        _pageTextCache[pageIndex] = extracted;
-        return extracted;
+        var task = _session.GetPageTextAsync(pageIndex);
+        _pendingPageText[pageIndex] = task;
+        try
+        {
+            var result = await task;
+            _pageTextCache[pageIndex] = result;
+            return result;
+        }
+        finally
+        {
+            _pendingPageText.Remove(pageIndex);
+        }
+    }
+
+    private static List<OutlineEntry> ConvertOutline(IReadOnlyList<PdfOutlineEntry> src)
+    {
+        var dst = new List<OutlineEntry>(src.Count);
+        foreach (var s in src)
+        {
+            dst.Add(new OutlineEntry
+            {
+                Title = s.Title,
+                Page = s.PageIndex >= 0 ? s.PageIndex : null,
+                Children = ConvertOutline(s.Children),
+            });
+        }
+        return dst;
     }
 
     /// <summary>
@@ -766,14 +814,18 @@ public partial class MainViewModel : ViewModelBase
 
         var session = _session;
         var resolver = _resolver;
-        var task = Task.Run(() =>
+        // PDF.js's getTextContent already runs in a Web Worker, so we
+        // don't need Task.Run to keep the UI thread free — awaiting
+        // directly is enough.
+        async Task<PageAnalysis> Compute()
         {
-            var (w, h) = session.GetPageSize(pageIndex);
-            var blocks = session.GetBlocks(pageIndex);
+            var (w, h) = await session.GetPageSizeAsync(pageIndex);
+            var blocks = await session.GetBlocksAsync(pageIndex);
             resolver.AssignOrder(blocks, w, h);
             blocks.Sort((a, b) => a.Order.CompareTo(b.Order));
             return new PageAnalysis { Blocks = blocks, PageWidth = w, PageHeight = h };
-        });
+        }
+        var task = Compute();
         _pendingAnalysis[pageIndex] = task;
 
         PageAnalysis result;
@@ -922,7 +974,7 @@ public partial class MainViewModel : ViewModelBase
     /// </summary>
     private async Task RenderCurrentPageAsync()
     {
-        if (_pdf is null) return;
+        if (_session is null) return;
         if (_renderInFlight) { _renderQueued = true; return; }
         _renderInFlight = true;
         try
@@ -940,56 +992,61 @@ public partial class MainViewModel : ViewModelBase
         }
     }
 
-    private Task RenderOnceAsync()
+    private async Task RenderOnceAsync()
     {
-        if (_pdf is null) return Task.CompletedTask;
-        var pdf = _pdf;
+        if (_session is null) return;
+        var session = _session;
         var page = CurrentPage;
         var targetSize = EffectiveRenderTargetSize;
         var searchHitsForPage = _searchHits.Where(h => h.PageIndex == page).ToList();
         var currentMatch = (CurrentMatchIndex >= 0 && CurrentMatchIndex < _searchHits.Count)
             ? _searchHits[CurrentMatchIndex] : null;
 
-        return Task.Run(() =>
+        try
         {
-            try
+            var (pageW, pageH) = await session.GetPageSizeAsync(page);
+            float scale = (float)(targetSize / Math.Max(pageW, pageH));
+            RenderScale = scale;
+            CurrentPagePointWidth = pageW;
+            CurrentPagePointHeight = pageH;
+
+            // PDF.js renders inside a Web Worker so the await yields
+            // until the worker posts back — UI thread stays free.
+            var rendered = await session.RenderPageAsync(page, targetSize);
+
+            // Paint search highlights into the RGBA buffer in place, then
+            // swizzle to BGRA (Avalonia's required pixel format).
+            foreach (var hit in searchHitsForPage)
             {
-                var (pageW, pageH) = pdf.GetPageSize(page);
-                float scale = (float)(targetSize / Math.Max(pageW, pageH));
-                Dispatcher.UIThread.Post(() =>
-                {
-                    RenderScale = scale;
-                    CurrentPagePointWidth = pageW;
-                    CurrentPagePointHeight = pageH;
-                });
-
-                var (rgb, width, height) = pdf.RenderPagePixmap(page, targetSize);
-
-                // Paint highlights INTO the rgb buffer so the View doesn't
-                // need a separate overlay (and so coordinate conversion
-                // stays in one place — page-points → bitmap pixels by
-                // multiplying by `scale`).
-                foreach (var hit in searchHitsForPage)
-                {
-                    bool isCurrent = ReferenceEquals(hit, currentMatch);
-                    var (r, g, b) = isCurrent
-                        ? (HighlightCurrentMatchR, HighlightCurrentMatchG, HighlightCurrentMatchB)
-                        : (HighlightOtherMatchR,  HighlightOtherMatchG,  HighlightOtherMatchB);
-                    foreach (var pageRect in hit.PagePointRects)
-                        PaintRectBlend(rgb, width, height, pageRect, scale, r, g, b, 0.5f);
-                }
-
-                var bmp = RgbToAvaloniaBitmap(rgb, width, height);
-                Dispatcher.UIThread.Post(() => PageImage = bmp);
+                bool isCurrent = ReferenceEquals(hit, currentMatch);
+                var (r, g, b) = isCurrent
+                    ? (HighlightCurrentMatchR, HighlightCurrentMatchG, HighlightCurrentMatchB)
+                    : (HighlightOtherMatchR,  HighlightOtherMatchG,  HighlightOtherMatchB);
+                foreach (var pageRect in hit.PagePointRects)
+                    PaintRectBlendRgba(rendered.Rgba, rendered.Width, rendered.Height, pageRect, scale, r, g, b, 0.5f);
             }
-            catch (Exception ex)
-            {
-                Dispatcher.UIThread.Post(() => StatusText = $"Render failed: {ex.Message}");
-            }
-        });
+
+            PageImage = RgbaToAvaloniaBitmapInPlace(rendered.Rgba, rendered.Width, rendered.Height);
+
+            // Pre-fetch page text so drag-select (which must be sync)
+            // hits the cache. Fire-and-forget — render isn't blocked
+            // on this.
+            _ = EnsurePageTextAsync(page);
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Render failed: {ex.Message}";
+        }
     }
 
-    private static void PaintRectBlend(byte[] rgb, int w, int h, RectF pageRect, float pageToBitmap,
+    /// <summary>
+    /// In-place alpha blend over an RGBA buffer (4-byte stride, A
+    /// channel left untouched). The buffer came from PDF.js's
+    /// <c>getImageData()</c> which is RGBA; we mutate it here and
+    /// the final swizzle to BGRA happens in
+    /// <see cref="RgbaToAvaloniaBitmapInPlace"/>.
+    /// </summary>
+    private static void PaintRectBlendRgba(byte[] rgba, int w, int h, RectF pageRect, float pageToBitmap,
         byte tintR, byte tintG, byte tintB, float alpha)
     {
         int x1 = Math.Max(0, (int)(pageRect.Left  * pageToBitmap));
@@ -1001,18 +1058,25 @@ public partial class MainViewModel : ViewModelBase
         float inv = 1f - alpha;
         for (int y = y1; y < y2; y++)
         {
-            int rowStart = y * w * 3;
+            int rowStart = y * w * 4;
             for (int x = x1; x < x2; x++)
             {
-                int idx = rowStart + x * 3;
-                rgb[idx]     = (byte)(rgb[idx]     * inv + tintR * alpha);
-                rgb[idx + 1] = (byte)(rgb[idx + 1] * inv + tintG * alpha);
-                rgb[idx + 2] = (byte)(rgb[idx + 2] * inv + tintB * alpha);
+                int idx = rowStart + x * 4;
+                rgba[idx]     = (byte)(rgba[idx]     * inv + tintR * alpha);
+                rgba[idx + 1] = (byte)(rgba[idx + 1] * inv + tintG * alpha);
+                rgba[idx + 2] = (byte)(rgba[idx + 2] * inv + tintB * alpha);
+                // alpha untouched
             }
         }
     }
 
-    private static WriteableBitmap RgbToAvaloniaBitmap(byte[] rgb, int width, int height)
+    /// <summary>
+    /// Swizzles RGBA → BGRA in place and copies into an
+    /// Avalonia <see cref="WriteableBitmap"/>. Saves an extra buffer
+    /// allocation versus the previous RGB→BGRA expand path. The input
+    /// array is mutated; callers shouldn't reuse it after.
+    /// </summary>
+    private static WriteableBitmap RgbaToAvaloniaBitmapInPlace(byte[] rgba, int width, int height)
     {
         var bmp = new WriteableBitmap(
             new PixelSize(width, height),
@@ -1021,19 +1085,15 @@ public partial class MainViewModel : ViewModelBase
             AlphaFormat.Opaque);
 
         int pixelCount = width * height;
-        var bgra = new byte[pixelCount * 4];
         for (int i = 0; i < pixelCount; i++)
         {
-            int s = i * 3;
-            int d = i * 4;
-            bgra[d]     = rgb[s + 2];
-            bgra[d + 1] = rgb[s + 1];
-            bgra[d + 2] = rgb[s];
-            bgra[d + 3] = 0xFF;
+            int idx = i * 4;
+            // RGBA → BGRA: swap R (idx) and B (idx+2). G, A unchanged.
+            (rgba[idx], rgba[idx + 2]) = (rgba[idx + 2], rgba[idx]);
         }
 
         using var frame = bmp.Lock();
-        Marshal.Copy(bgra, 0, frame.Address, bgra.Length);
+        Marshal.Copy(rgba, 0, frame.Address, rgba.Length);
         return bmp;
     }
 
