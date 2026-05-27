@@ -138,6 +138,16 @@
                      PointerReleased="OnPagePointerReleased"
                      PointerWheelChanged="OnPagePointerWheelChanged" />
               <Canvas IsHitTestVisible="False" ClipToBounds="True">
+                <!-- Line focus dim mask: four rects covering the
+                     non-active area (top / bottom / left / right of
+                     the active line). All semi-opaque black so the
+                     eye anchors on the bright untouched strip in
+                     the middle. Declared BEFORE the active overlays
+                     so the masks sit underneath them in z-order. -->
+                <Rectangle x:Name="FocusMaskTop"    Fill="#66000000" IsVisible="False" />
+                <Rectangle x:Name="FocusMaskBottom" Fill="#66000000" IsVisible="False" />
+                <Rectangle x:Name="FocusMaskLeft"   Fill="#66000000" IsVisible="False" />
+                <Rectangle x:Name="FocusMaskRight"  Fill="#66000000" IsVisible="False" />
                 <!-- Rail-mode active block (subtle blue outline). -->
                 <Rectangle x:Name="ActiveBlockRect"
                            Stroke="#FF3B82F6"

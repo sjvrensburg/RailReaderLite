@@ -20,6 +20,14 @@ public partial class MainView : UserControl
     /// Null when no drag is active.</summary>
     private Point? _selectionStart;
 
+    /// <summary>Free-pan state — set on Ctrl+pointer-down, cleared on
+    /// pointer-up. While non-null, pointer-move drags the
+    /// ScrollViewer's offset rather than the selection rect. Matches
+    /// the desktop rail-reader's "Ctrl+drag temporarily exits rail
+    /// mode" gesture.</summary>
+    private Point? _panStart;
+    private Vector _panInitialOffset;
+
     private MainViewModel? _subscribedVm;
 
     public MainView()
@@ -62,10 +70,11 @@ public partial class MainView : UserControl
     {
         if (DataContext is not MainViewModel vm) return;
 
-        if (!vm.IsRailMode)
+        // Suspend overlay during free pan — the user is exploring the
+        // page; rail visuals would just be in the way.
+        if (!vm.IsRailMode || _panStart is not null)
         {
-            ActiveBlockRect.IsVisible = false;
-            ActiveLineRect.IsVisible = false;
+            HideAllRailOverlays();
             return;
         }
 
@@ -91,12 +100,85 @@ public partial class MainView : UserControl
             ActiveLineRect.Width = l.Width;
             ActiveLineRect.Height = l.Height;
             ActiveLineRect.IsVisible = true;
+            UpdateFocusMask(l);
             ScrollToCanvasRect(l);
         }
         else
         {
             ActiveLineRect.IsVisible = false;
+            HideFocusMask();
         }
+    }
+
+    private void HideAllRailOverlays()
+    {
+        ActiveBlockRect.IsVisible = false;
+        ActiveLineRect.IsVisible = false;
+        HideFocusMask();
+    }
+
+    private void HideFocusMask()
+    {
+        FocusMaskTop.IsVisible = false;
+        FocusMaskBottom.IsVisible = false;
+        FocusMaskLeft.IsVisible = false;
+        FocusMaskRight.IsVisible = false;
+    }
+
+    /// <summary>
+    /// Positions four dim-mask rects around the active line so the
+    /// line itself stays bright and everything else gets darkened.
+    /// Mask dimensions are derived from the displayed bitmap size
+    /// (not the Canvas's reported bounds, which may lag during
+    /// resize). The mask sits underneath the active-line rect in
+    /// z-order so the line's bright tint stays intact.
+    /// </summary>
+    private void UpdateFocusMask(Avalonia.Rect line)
+    {
+        if (PageImageView.Source is not Bitmap bmp)
+        {
+            HideFocusMask();
+            return;
+        }
+        // Displayed image size — same calc as PageRectToCanvas. Mask
+        // covers (0,0) to (displayedW, displayedH) minus the line rect.
+        double scaleX = PageImageView.Bounds.Width  / bmp.PixelSize.Width;
+        double scaleY = PageImageView.Bounds.Height / bmp.PixelSize.Height;
+        double displayScale = Math.Min(scaleX, scaleY);
+        if (displayScale <= 0) { HideFocusMask(); return; }
+        if (displayScale > 1) displayScale = 1;
+        double displayedW = bmp.PixelSize.Width  * displayScale;
+        double displayedH = bmp.PixelSize.Height * displayScale;
+        double offsetX = (PageImageView.Bounds.Width  - displayedW) / 2.0;
+        double offsetY = (PageImageView.Bounds.Height - displayedH) / 2.0;
+
+        // Top strip: from image-top down to line-top.
+        Canvas.SetLeft(FocusMaskTop, offsetX);
+        Canvas.SetTop (FocusMaskTop, offsetY);
+        FocusMaskTop.Width  = displayedW;
+        FocusMaskTop.Height = Math.Max(0, line.Y - offsetY);
+        FocusMaskTop.IsVisible = FocusMaskTop.Height > 0;
+
+        // Bottom strip: from line-bottom to image-bottom.
+        Canvas.SetLeft(FocusMaskBottom, offsetX);
+        Canvas.SetTop (FocusMaskBottom, line.Y + line.Height);
+        FocusMaskBottom.Width  = displayedW;
+        FocusMaskBottom.Height = Math.Max(0, (offsetY + displayedH) - (line.Y + line.Height));
+        FocusMaskBottom.IsVisible = FocusMaskBottom.Height > 0;
+
+        // Left strip: image-left to line-left, at line's vertical band.
+        Canvas.SetLeft(FocusMaskLeft, offsetX);
+        Canvas.SetTop (FocusMaskLeft, line.Y);
+        FocusMaskLeft.Width  = Math.Max(0, line.X - offsetX);
+        FocusMaskLeft.Height = line.Height;
+        FocusMaskLeft.IsVisible = FocusMaskLeft.Width > 0;
+
+        // Right strip: line-right to image-right, at line's vertical band.
+        Canvas.SetLeft(FocusMaskRight, line.X + line.Width);
+        Canvas.SetTop (FocusMaskRight, line.Y);
+        FocusMaskRight.Width  = Math.Max(0, (offsetX + displayedW) - (line.X + line.Width));
+        FocusMaskRight.Height = line.Height;
+        FocusMaskRight.IsVisible = FocusMaskRight.Width > 0;
     }
 
     /// <summary>
@@ -142,21 +224,75 @@ public partial class MainView : UserControl
         return new Avalonia.Rect(x, y, w, h);
     }
 
+    /// <summary>Vertical fraction of the viewport where the active
+    /// line is anchored — 1/3 from the top keeps it visible with
+    /// some context above and more reading space below.</summary>
+    private const double RailAnchorFraction = 1.0 / 3.0;
+
     /// <summary>
-    /// Scrolls the surrounding <see cref="ScrollViewer"/> so the active
-    /// line rectangle is fully visible. We let Avalonia's built-in
-    /// <c>BringIntoView</c> walk the visual tree — it handles the
-    /// Canvas → Grid → ScrollViewer translation, including the 16-px
-    /// Grid margin, the centring alignment, and the current zoom.
+    /// Anchored-cursor scrolling. Instead of <c>BringIntoView</c>
+    /// (which snaps the line to "just visible" and lets it drift
+    /// around the viewport as the user advances), we compute the
+    /// scroll offset that places the active line at a fixed fraction
+    /// of the viewport height. The page scrolls smoothly underneath
+    /// while the reading position stays put — much closer to how the
+    /// desktop rail-reader feels.
     /// </summary>
     private void ScrollToCanvasRect(Avalonia.Rect canvasRect)
     {
-        _ = canvasRect;  // rect already pushed onto ActiveLineRect; BringIntoView reads layout
-        // Defer until after the layout pass so the rect's position
-        // reflects the just-set Canvas.Left/Top values.
+        _ = canvasRect;
         Avalonia.Threading.Dispatcher.UIThread.Post(
-            () => ActiveLineRect.BringIntoView(),
-            Avalonia.Threading.DispatcherPriority.Background);
+            AnchorActiveLine, Avalonia.Threading.DispatcherPriority.Background);
+    }
+
+    private void AnchorActiveLine()
+    {
+        if (!ActiveLineRect.IsVisible) return;
+        var sv = PageScroller;
+        var rectTopInViewport = ActiveLineRect.TranslatePoint(new Point(0, 0), sv);
+        if (rectTopInViewport is null) return;
+        // Position in content-space = position in viewport + current offset.
+        double lineYInContent = rectTopInViewport.Value.Y + sv.Offset.Y;
+        double targetOffsetY = lineYInContent - RailAnchorFraction * sv.Viewport.Height;
+        double maxOffset = Math.Max(0, sv.Extent.Height - sv.Viewport.Height);
+        double clamped = Math.Clamp(targetOffsetY, 0, maxOffset);
+        _ = AnimateScrollY(clamped);
+    }
+
+    private const double ScrollAnimationDurationMs = 180.0;
+    private System.Threading.CancellationTokenSource? _scrollCts;
+
+    /// <summary>
+    /// Cubic ease-out animated scroll to <paramref name="targetY"/>.
+    /// Cancels any in-flight animation so rapid ↓ presses fold into
+    /// one smooth motion rather than queuing. Steps at ~16ms (60fps)
+    /// — in WASM single-thread that's still cooperative, but
+    /// PDF.js running in its Web Worker keeps the UI thread free
+    /// enough that frames land on time.
+    /// </summary>
+    private async Task AnimateScrollY(double targetY)
+    {
+        _scrollCts?.Cancel();
+        _scrollCts = new System.Threading.CancellationTokenSource();
+        var ct = _scrollCts.Token;
+        var sv = PageScroller;
+        double startY = sv.Offset.Y;
+        if (Math.Abs(targetY - startY) < 0.5) return;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            while (true)
+            {
+                if (ct.IsCancellationRequested) return;
+                double elapsed = sw.Elapsed.TotalMilliseconds;
+                double t = Math.Min(1.0, elapsed / ScrollAnimationDurationMs);
+                double eased = 1.0 - Math.Pow(1.0 - t, 3.0);  // cubic ease-out
+                sv.Offset = new Vector(sv.Offset.X, startY + (targetY - startY) * eased);
+                if (t >= 1.0) return;
+                await Task.Delay(16, ct);
+            }
+        }
+        catch (TaskCanceledException) { /* superseded */ }
     }
 
     /// <summary>
@@ -173,8 +309,20 @@ public partial class MainView : UserControl
         if (!vm.IsRailMode) return;
         if (e.Source is TextBox) return;  // don't steal keys from search box
 
-        bool isRailKey = e.Key is Key.Down or Key.Up or Key.Left or Key.Right or Key.Home or Key.End;
-        if (!isRailKey) return;
+        // Once the UserControl took focus we became the only place
+        // arrow keys go — the ScrollViewer's default handler never
+        // sees them, so we have to act on ←/→ ourselves. ↑/↓/Home/End
+        // are rail-nav; ←/→ are horizontal page-scroll at any zoom.
+        bool isRailKey = e.Key is Key.Down or Key.Up or Key.Home or Key.End;
+        bool isHScrollKey = e.Key is Key.Left or Key.Right;
+        if (!isRailKey && !isHScrollKey) return;
+
+        if (isHScrollKey)
+        {
+            HScroll(e.Key == Key.Right ? HorizontalScrollStep : -HorizontalScrollStep);
+            e.Handled = true;
+            return;
+        }
 
         // Enter rail mode near the visible region on first keystroke.
         if (vm.CurrentBlockIndex < 0)
@@ -186,11 +334,9 @@ public partial class MainView : UserControl
         switch (e.Key)
         {
             case Key.Down:
-            case Key.Right:
                 if (vm.RailNextLineCommand.CanExecute(null)) vm.RailNextLineCommand.Execute(null);
                 break;
             case Key.Up:
-            case Key.Left:
                 if (vm.RailPrevLineCommand.CanExecute(null)) vm.RailPrevLineCommand.Execute(null);
                 break;
             case Key.Home:
@@ -203,6 +349,45 @@ public partial class MainView : UserControl
                 break;
         }
         e.Handled = true;
+    }
+
+    private const double HorizontalScrollStep = 80.0;
+
+    private void HScroll(double delta)
+    {
+        var sv = PageScroller;
+        double maxX = Math.Max(0, sv.Extent.Width - sv.Viewport.Width);
+        double newX = Math.Clamp(sv.Offset.X + delta, 0, maxX);
+        if (Math.Abs(newX - sv.Offset.X) < 0.5) return;
+        sv.Offset = new Vector(newX, sv.Offset.Y);
+    }
+
+    /// <summary>Returns the page-point coordinates of the viewport
+    /// centre, or null if rendering isn't ready. Used after a free-pan
+    /// release to re-snap the rail cursor.</summary>
+    private (float X, float Y)? ViewportCenterInPagePoints(MainViewModel vm)
+    {
+        if (PageImageView.Source is not Bitmap bmp) return null;
+        if (vm.RenderScale <= 0) return null;
+        if (PageImageView.Bounds.Width <= 0 || PageImageView.Bounds.Height <= 0) return null;
+
+        var imageTopLeft = PageImageView.TranslatePoint(new Point(0, 0), PageScroller);
+        if (imageTopLeft is null) return null;
+
+        double viewportCenterXInVp = PageScroller.Viewport.Width  / 2.0;
+        double viewportCenterYInVp = PageScroller.Viewport.Height / 2.0;
+        double imageLocalX = viewportCenterXInVp - imageTopLeft.Value.X;
+        double imageLocalY = viewportCenterYInVp - imageTopLeft.Value.Y;
+
+        double scaleX = PageImageView.Bounds.Width  / bmp.PixelSize.Width;
+        double scaleY = PageImageView.Bounds.Height / bmp.PixelSize.Height;
+        double displayScale = Math.Min(scaleX, scaleY);
+        if (displayScale <= 0) return null;
+        if (displayScale > 1) displayScale = 1;
+
+        double bitmapX = imageLocalX / displayScale;
+        double bitmapY = imageLocalY / displayScale;
+        return ((float)(bitmapX / vm.RenderScale), (float)(bitmapY / vm.RenderScale));
     }
 
     /// <summary>
@@ -245,6 +430,21 @@ public partial class MainView : UserControl
         var local = e.GetPosition(img);
         if (local.X < 0 || local.Y < 0 ||
             local.X > img.Bounds.Width || local.Y > img.Bounds.Height) return;
+
+        // Ctrl held → free pan (temporarily exit rail mode). Selection
+        // rect stays hidden; rail overlay is hidden by SyncRailOverlay
+        // for the duration via the _panStart check.
+        if (e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            _panStart = local;
+            _panInitialOffset = PageScroller.Offset;
+            SelectionRect.IsVisible = false;
+            ActiveLineRect.IsVisible = false;
+            ActiveBlockRect.IsVisible = false;
+            e.Pointer.Capture(img);
+            return;
+        }
+
         _selectionStart = local;
         SelectionRect.IsVisible = false;
         e.Pointer.Capture(img);
@@ -253,12 +453,28 @@ public partial class MainView : UserControl
     private void OnPagePointerMoved(object? sender, PointerEventArgs e)
     {
         if (sender is not Image img) return;
+
+        // Free pan: drag the ScrollViewer's offset by the pointer
+        // delta. Negative delta because moving the pointer right
+        // should reveal content to the right (offset increases).
+        if (_panStart is { } panStart)
+        {
+            var cur = e.GetPosition(img);
+            var sv = PageScroller;
+            double maxX = Math.Max(0, sv.Extent.Width - sv.Viewport.Width);
+            double maxY = Math.Max(0, sv.Extent.Height - sv.Viewport.Height);
+            sv.Offset = new Vector(
+                Math.Clamp(_panInitialOffset.X - (cur.X - panStart.X), 0, maxX),
+                Math.Clamp(_panInitialOffset.Y - (cur.Y - panStart.Y), 0, maxY));
+            return;
+        }
+
         if (_selectionStart is not { } start) return;
-        var cur = e.GetPosition(img);
-        double x = Math.Min(start.X, cur.X);
-        double y = Math.Min(start.Y, cur.Y);
-        double w = Math.Abs(cur.X - start.X);
-        double h = Math.Abs(cur.Y - start.Y);
+        var c = e.GetPosition(img);
+        double x = Math.Min(start.X, c.X);
+        double y = Math.Min(start.Y, c.Y);
+        double w = Math.Abs(c.X - start.X);
+        double h = Math.Abs(c.Y - start.Y);
         Canvas.SetLeft(SelectionRect, x);
         Canvas.SetTop(SelectionRect, y);
         SelectionRect.Width = w;
@@ -266,23 +482,64 @@ public partial class MainView : UserControl
         SelectionRect.IsVisible = w > 1 || h > 1;
     }
 
+    /// <summary>Max pointer delta (in image-local pixels) below which a
+    /// release is treated as a click rather than a drag. Below this
+    /// threshold we snap the rail cursor to the clicked line instead
+    /// of starting a clipboard write.</summary>
+    private const double ClickVsDragThreshold = 4.0;
+
     private async void OnPagePointerReleased(object? sender, PointerReleasedEventArgs e)
     {
         if (sender is not Image img) return;
+
+        // Pan release: snap the rail cursor to the line nearest the
+        // viewport centre so the user picks up reading at the
+        // spatially-correct place rather than wherever they were
+        // before the pan started.
+        if (_panStart is not null)
+        {
+            _panStart = null;
+            e.Pointer.Capture(null);
+            if (DataContext is MainViewModel vm)
+            {
+                var centerPage = ViewportCenterInPagePoints(vm);
+                if (centerPage is { } cp)
+                {
+                    vm.EnterRailModeNearPagePoint(cp.X, cp.Y);
+                }
+            }
+            return;
+        }
+
         if (_selectionStart is not { } start) return;
         e.Pointer.Capture(null);
         SelectionRect.IsVisible = false;
         try
         {
             var end = e.GetPosition(img);
+            double dx = Math.Abs(end.X - start.X);
+            double dy = Math.Abs(end.Y - start.Y);
+            if (DataContext is not MainViewModel vm) return;
+
+            // Click (no meaningful drag): snap the rail cursor to the
+            // line nearest the clicked point. No clipboard work.
+            if (dx < ClickVsDragThreshold && dy < ClickVsDragThreshold)
+            {
+                var clickPage = LocalToPagePoint(img, end);
+                if (clickPage is not null)
+                {
+                    vm.EnterRailModeNearPagePoint(
+                        (float)clickPage.Value.X, (float)clickPage.Value.Y);
+                }
+                return;
+            }
+
+            // Drag: extract selection + write to clipboard inside the
+            // user-gesture stack frame (browser authorisation).
             var anchorPage = LocalToPagePoint(img, start);
             var endPage = LocalToPagePoint(img, end);
             if (anchorPage is null || endPage is null) return;
-            if (DataContext is not MainViewModel vm) return;
 
-            // Compute the selection synchronously inside the
-            // user-gesture stack frame so the browser still
-            // considers the clipboard write authorised.
             var selected = vm.GetSelectedText(
                 anchorPage.Value.X, anchorPage.Value.Y,
                 endPage.Value.X, endPage.Value.Y);

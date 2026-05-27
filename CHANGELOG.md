@@ -1,5 +1,169 @@
 # Changelog
 
+## 0.8.0 — final Lite release before the mobile pivot
+
+This is the last planned feature release for the WebAssembly Lite
+build. Heuristic DLA on PDF.js's word-level extraction has a ceiling:
+multi-column papers with tight figure layouts keep finding edge cases
+that an unmodelled segmenter can't reliably solve. The structurally
+right answer for a polished commercial rail-reader is a native build
+that can carry an actual layout model — see
+`RailDLA/PORTING.md` for the model + algorithmic stack the next
+codebase will follow (.NET MAUI + ONNX Runtime + PP-DocLayoutV3 is
+the planned target).
+
+Lite stays public, MIT, and reusable. It remains a working
+WebAssembly PDF viewer with drag-to-copy, search, manual zoom,
+outline, click-to-snap, free pan, and a usable-on-most-text-pages
+rail mode. The rail-mode work — RailDLA-derived algorithmic ports,
+column-aware reading order, decoration filtering, the overlay
+interactions — are the load-bearing pieces and they transfer to
+mobile unchanged because they operate on
+`RailReader.Core` abstractions.
+
+**RailDLA ports + rail-mode bug fixes.** The v0.7.0 PDF.js bring-up
+banked the speed; this release fixes the rail-mode quality issues
+the user surfaced (reading order broken on multi-column papers,
+line highlight covering multiple lines, headers/footers walked as
+nav targets, app hanging when switching PDFs, ←/→ should scroll
+horizontally not advance lines, scroll-anchor too jittery).
+
+The three algorithmic ports come from
+[RailDLA](https://github.com/sjvrensburg/RailDLA) — the Python
+prototype where these have been validated against a 44-PDF / 126-page
+academic corpus. RailDLA itself ports them from PdfPig, which
+implements the underlying literature (O'Gorman 1993, Klampfl 2014).
+
+### Added
+
+- **Klampfl reading order via Allen's interval algebra**
+  (`KlampflReadingOrder.cs`). Replaces the v0.7.0 path that used
+  `XYCutPlusPlusResolver` from Core. Each block projects to X and
+  Y intervals; two blocks have a "before in reading" relation when
+  their interval-pair relations match one of a small set of
+  column-wise patterns. The relations form a directed graph;
+  topological order falls out by repeatedly removing the node with
+  the most outgoing edges. Per RailDLA/PORTING.md §3.5, ~26% of
+  pages in the validation corpus disagreed with naive lattice
+  sorts; Klampfl was correct on every audited case.
+- **Histogram-peak Docstrum** (`DocstrumSegmenter.cs`). Replaces
+  v0.7.0's fixed-threshold word-level clusterer. Estimates the
+  within-line and between-line gaps from the most-populated bucket
+  of the nearest-neighbour distance histogram (O'Gorman 1993,
+  axis-aligned bounding-box-input variant). Block construction
+  requires ≥10% X-overlap between consecutive lines — that's the
+  geometric path to column awareness with no raster needed.
+- **Klampfl decoration classifier** (`KlampflDecoration.cs`).
+  Cross-page text repetition for running headers, footers, and
+  page numbers. Levenshtein edit distance over digit-normalised
+  text × geometric IoU. The `MaxDecorationLen = 500` length
+  fast-path is preserved verbatim — without it, body-vs-body
+  Levenshtein would dominate runtime. Duplex handling: for docs
+  with >3 pages, compare p ↔ p±2 (not p±1) so alternating
+  headers on left/right pages still match. Rail-nav skips
+  decoration-flagged blocks.
+- **Per-line bounding rects** in the segmentation output. The
+  active-line overlay now hugs each line's actual extent (Left,
+  Right, Top, Bottom from Docstrum) instead of the block's
+  full width.
+
+### Changed
+
+- **Anchored-cursor scroll.** Instead of `BringIntoView` (which
+  snaps the active line to "just visible" and lets it drift around
+  the viewport as you advance), the View now computes the scroll
+  offset that places the active line at a fixed fraction (1/3)
+  of viewport height. The page scrolls smoothly underneath while
+  the reading position stays put — much closer to how the desktop
+  rail-reader feels.
+- **`←` / `→` propagate to the `ScrollViewer`** so they scroll
+  horizontally (the v0.6.0 behaviour you originally asked for).
+  v0.6.x had them as line-nav per a request that was later
+  reversed; this restores the horizontal-pan semantic. Line nav
+  stays on `↑` / `↓`; Home / End jump to first/last line of page.
+
+### Fixed
+
+- **Switching to a new PDF no longer hangs the app.** A monotonic
+  generation counter is bumped before the new doc opens; every
+  async analysis / text-extract helper captures the generation
+  at start and bails (without writing to caches) if the generation
+  changed while it was awaiting JS interop. Pending tasks from the
+  old doc no longer write into the new doc's cache and wedge it.
+
+### Performance
+
+- Docstrum's histogram-peak estimate self-adapts to a document's
+  actual word spacing — tight academic typesetting and loose
+  body-copy work with the same code, no per-document tuning.
+- The decoration classifier runs once per document on the
+  background thread, after at least two pages are analysed.
+  Idempotent and pre-warmed.
+
+### Rail-mode polish (desktop-alignment iteration)
+
+After the first v0.8.0 manual-test pass, four refinements to align
+the rail experience with the desktop app:
+
+- **`←` / `→` horizontal page-scroll** — programmatically driven
+  via `ScrollViewer.Offset.X` (the events don't reach the
+  ScrollViewer when the focusable UserControl absorbs arrow keys).
+  Step is 80 px per press. Works at any zoom.
+- **Click-to-snap-to-line.** Pointer release within ~4 px of press
+  is treated as a click rather than a drag — the rail cursor
+  snaps to the block whose bbox contains the point, and the line
+  whose Y-centre is nearest. Drag still does drag-to-copy.
+- **Cubic ease-out scroll** replaces the instant `Offset` set
+  from v0.8.0's first iteration. ~180 ms animation; rapid
+  consecutive presses cancel the in-flight animation so motion
+  stays continuous rather than queuing.
+- **Free pan via `Ctrl+drag`** — Ctrl held at pointer-down enters
+  a temporary pan mode where the cursor delta drags the page.
+  Rail overlay hides during pan. On pointer release, the rail
+  cursor re-snaps to the line nearest the viewport centre.
+- **Line focus dim mask** — four 40%-opacity black rectangles
+  cover the area outside the active line band, so the eye
+  anchors on the bright line without per-frame raster work.
+  Rendered as Canvas overlays; zero cost beyond the four rect
+  layouts.
+
+### Docstrum hardening (after initial 0.8.0 manual testing)
+
+The first 0.8.0 pass landed Klampfl + Docstrum but real PDFs
+surfaced two failure modes that needed dedicated fixes:
+
+- **Per-character text emission breaks histogram-peak.** Some
+  scientific PDFs emit text per-glyph (kerning) rather than per-
+  word; the histogram-peak gap estimate then locks onto the ~0 pt
+  intra-word spacing and the line clusterer never joins anything.
+  Fix: floor the within-line gap at 30 % of median item height
+  (and the between-line gap at 80 %). On normal word-level
+  extraction the estimate dominates; the floor only kicks in for
+  the broken-emission case.
+- **Justified text can collapse Docstrum's word-gap estimate above
+  the column-gutter width.** Loose justification produces 10–15 pt
+  inter-word gaps; with the 3× multiplier `maxWithin` reaches
+  30–45 pt, which is wider than a typical academic column gutter,
+  so the line clusterer unions a paragraph end with the figure
+  caption next to it. Fix: hard cap `maxWithin` at 2.5 % of page
+  width (≈ 15 pt for a US-letter page) — smaller than every
+  gutter we've seen in real corpora.
+- **Stray narrow blocks distort the column-wise reading order.**
+  Klampfl's "strictly left of" predicate ignores Y, so a 6 pt-wide
+  single-character block sorts ahead of any wider block it
+  precedes horizontally — regardless of vertical position. Fix:
+  drop blocks below `BlockMinAreaFrac = 0.0006` of page area,
+  ported from RailDLA. On a 612 × 792 page this prunes anything
+  smaller than ~290 pt² (citation superscripts, decoration
+  glyphs, footnote markers).
+
+### Diagnostic logging
+
+Per-page DLA emits a one-liner with the actual gap thresholds
+(`[Docstrum] pageW=… maxWithin=… maxBetween=…`) plus a block-by-
+block dump (raw, then reordered). Useful when revisiting Lite
+later or porting the algorithmic stack to the mobile build.
+
 ## 0.7.0
 
 **Backend swap.** v0.6.0 worked but was structurally too slow:
