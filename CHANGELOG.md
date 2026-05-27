@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.3
+
+### Added
+
+- **Live selection highlight during drag-to-copy.** As you drag across
+  text on the page, a translucent blue rectangle now tracks the
+  pointer in real time so you can see exactly what will land on the
+  clipboard. Implemented as a `Canvas` sibling of the page `Image`
+  inside the same `Grid` cell, so they share a coordinate system —
+  the overlay updates by setting `Canvas.Left/Top` + `Width/Height`
+  on a single `Rectangle`, never touches the rendered bitmap, and
+  costs effectively nothing per pointer-move event. The deferred
+  feature called out in the 0.5.0 CHANGELOG ("would burn 50–100 ms
+  re-rendering the bitmap per pointer-move"). The drag anchor is now
+  stored in image-local pixel space instead of page-point space so the
+  Move handler doesn't have to re-run the inverse mapping on every
+  frame; the page-point conversion happens once on release before
+  calling `vm.GetSelectedText`.
+
 ## 0.5.2
 
 ### Fixed

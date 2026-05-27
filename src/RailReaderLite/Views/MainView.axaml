@@ -97,21 +97,28 @@
                        Opacity="0.6" HorizontalAlignment="Center" />
           </StackPanel>
 
-          <!-- Rendered page. Pointer events handle drag-to-select. -->
+          <!-- Rendered page. Pointer events handle drag-to-select; a
+               Canvas sibling draws the live selection rect during drag. -->
           <ScrollViewer HorizontalScrollBarVisibility="Auto"
                         VerticalScrollBarVisibility="Auto"
                         IsVisible="{Binding HasDocument}">
-            <Image x:Name="PageImageView"
-                   Source="{Binding PageImage}"
-                   Stretch="Uniform"
-                   StretchDirection="DownOnly"
-                   HorizontalAlignment="Center"
-                   VerticalAlignment="Center"
-                   Margin="16"
-                   Cursor="IBeam"
-                   PointerPressed="OnPagePointerPressed"
-                   PointerMoved="OnPagePointerMoved"
-                   PointerReleased="OnPagePointerReleased" />
+            <Grid HorizontalAlignment="Center" VerticalAlignment="Center" Margin="16">
+              <Image x:Name="PageImageView"
+                     Source="{Binding PageImage}"
+                     Stretch="Uniform"
+                     StretchDirection="DownOnly"
+                     Cursor="IBeam"
+                     PointerPressed="OnPagePointerPressed"
+                     PointerMoved="OnPagePointerMoved"
+                     PointerReleased="OnPagePointerReleased" />
+              <Canvas IsHitTestVisible="False" ClipToBounds="True">
+                <Rectangle x:Name="SelectionRect"
+                           Fill="#553B82F6"
+                           Stroke="#FF3B82F6"
+                           StrokeThickness="1"
+                           IsVisible="False" />
+              </Canvas>
+            </Grid>
           </ScrollViewer>
 
           <!-- Busy indicator -->
