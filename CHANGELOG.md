@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.7.0
+
+**Backend swap.** v0.6.0 worked but was structurally too slow:
+PdfPig (pure-managed parsing) + SkiaSharp (software rasterisation),
+both on the .NET WASM single thread, can't compete with the native
+PDF viewers users compare against. This release swaps the entire
+parse + render path to PDF.js, which runs in a Web Worker (free
+background thread) and uses the browser's GPU-accelerated Canvas2D.
+All the rail-mode UI, the XY-Cut reading-order resolver, and the
+LayoutBlock / LineInfo types from `RailReader.Core` transfer
+unchanged — they were designed against the Core abstractions, not
+the PDF backend.
+
+### Added
+
+- **PDF.js 5.7.284 bundled into `wwwroot/lib/pdfjs/`.** Modern ES
+  module build (`pdf.min.mjs` + `pdf.worker.min.mjs`). Loaded by a
+  side-effect import in `main.js`.
+- **`pdfjs-shim.mjs`** — thin JS wrapper that exposes
+  `globalThis.RailReaderPdfJs` with five async methods
+  (`openDoc` / `closeDoc` / `getPageSize` / `renderPage` /
+  `getTextItemsJson` / `getOutlineJson`). Returns JSON strings for
+  small structured data and a raw `Uint8Array` for the render
+  payload. Maintains a per-document handle cache + a per-page text
+  cache.
+- **`IPdfJsRuntime` + `PdfJsRuntimeRegistry`** (shared project) —
+  abstraction layer so the platform-agnostic VM doesn't pull in
+  `[JSImport]` (which only compiles against the `browser` TFM). The
+  Browser entry point constructs a concrete
+  `PdfJsRuntime` and publishes it via the registry on startup.
+- **`PdfJsRuntime`** (Browser project) — `[JSImport]`-backed
+  implementation. Splits `renderPage` into an async `Task` + sync
+  `byte[]` fetch + two sync int getters; the JSImport source
+  generator can't marshal `Task<byte[]>` (SYSLIB1072), but supports
+  the pieces separately. Safe because renders are serialised in the
+  VM.
+- **`PdfJsSession`** (shared project) — per-document session that
+  owns a PDF.js document handle. Exposes async methods for page
+  size, render, text, blocks, outline. Built on top of
+  `IPdfJsRuntime` so it's testable without a browser.
+- **Word-level Docstrum-equivalent DLA.** PDF.js's `getTextContent`
+  emits word-level rects (each item is typically a word). The new
+  clusterer in `PdfJsSession` runs two phases: items → lines
+  (mid-Y cluster + horizontal-gap split — this is what catches
+  column gutters), then lines → blocks (column-aware vertical
+  clustering that requires X-range overlap before extending an
+  existing block). Reading order still comes from
+  `XYCutPlusPlusResolver` in Core.
+
+### Changed
+
+- **`MainViewModel`** rewritten end-to-end against `PdfJsSession`.
+  All session calls are async; analysis runs without `Task.Run`
+  because PDF.js already provides background work via the Web
+  Worker. Text extraction is sync-cached + async-pre-fetched so
+  drag-to-copy (which needs a sync read inside the user-gesture
+  frame) still works without a stall.
+- **Bitmap pipeline.** PDF.js returns RGBA from
+  `ImageData.data`, so the buffer is mutated in place for both
+  search-hit blending and the final RGBA → BGRA swizzle into the
+  Avalonia `WriteableBitmap`. One byte[] allocation instead of two.
+- **Outline conversion** at the VM boundary: PDF.js's resolved
+  page indices → Core's `OutlineEntry.Page` (nullable).
+
+### Removed
+
+- `RailReader.Core.PdfPig` direct dependency (was transitive; now
+  not needed at all).
+- `RailReader.Renderer.PdfPigSkia` package — no longer imported.
+- `LitePdfPigSession` — superseded by `PdfJsSession`.
+- Two PdfPig-flavoured smoke tests (the packages they exercised
+  are gone).
+
+### Build dependency
+
+`wasm-tools` workload is still required for the SkiaSharp native
+link (Avalonia uses SkiaSharp for text rendering even though Lite
+no longer rasterises PDFs through it). Same install instructions
+as v0.3.1's CHANGELOG.
+
 ## 0.6.0
 
 Rail mode lands — the headline feature for the v0.x series. The page

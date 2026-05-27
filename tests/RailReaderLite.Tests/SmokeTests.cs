@@ -65,23 +65,13 @@ public class SmokeTests
         Assert.True(LayoutConstants.ConfidenceThreshold > 0);
     }
 
-    [Fact]
-    public void PdfPig_text_service_constructs()
-    {
-        // Sanity: the pure-managed parser package is consumable.
-        var svc = new RailReader.Core.PdfPig.PdfTextService();
-        Assert.NotNull(svc);
-    }
-
-    [Fact]
-    public void PdfPigSkia_factory_constructs()
-    {
-        // Sanity: the rasterisation renderer package is consumable
-        // and exposes the full IPdfServiceFactory surface.
-        var factory = new RailReader.Renderer.PdfPigSkia.PdfPigSkiaPdfServiceFactory();
-        Assert.NotNull(factory.CreatePdfTextService());
-        Assert.NotNull(factory.CreatePdfLinkService());
-    }
+    // v0.7.0 dropped both RailReader.Core.PdfPig and
+    // RailReader.Renderer.PdfPigSkia — Lite's PDF backend is now PDF.js
+    // (browser-only, exercised via JSInterop), so package-consumability
+    // smoke tests for those don't apply any more. XYCutPlusPlusResolver
+    // and LayoutBlock from RailReader.Core are still in use; the
+    // Core_layout_constants_are_reachable test above already covers
+    // that surface.
 
     [Fact]
     public void Zoom_defaults_to_1_and_commands_gate_on_document_state()
