@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <VersionPrefix>0.5.1</VersionPrefix>
+    <VersionPrefix>0.5.2</VersionPrefix>
     <Authors>sjvrensburg</Authors>
     <Copyright>Copyright © 2026 Stefan van Rensburg</Copyright>
     <RepositoryUrl>https://github.com/sjvrensburg/RailReaderLite.git</RepositoryUrl>
