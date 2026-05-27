@@ -56,11 +56,20 @@ public partial class MainViewModel : ViewModelBase
     /// JSInterop layer via <see cref="PdfJsRuntimeRegistry.Current"/>.</summary>
     private PdfJsSession? _session;
 
-    private readonly IReadingOrderResolver _resolver = new XYCutPlusPlusResolver();
+    // Klampfl reading-order via Allen's interval algebra (RailDLA port)
+    // is invoked directly in EnsurePageAnalysisAsync so the per-line
+    // rect cache can be reordered in lockstep with the blocks.
 
     /// <summary>Per-page analysis result cache. Blocks are stored in
     /// reading order with their <c>Lines</c> populated.</summary>
     private readonly Dictionary<int, PageAnalysis> _analysisCache = new();
+
+    /// <summary>Per-page per-block per-line bounding rects in
+    /// page-point space — parallel to <c>analysis.Blocks[i].Lines</c>.
+    /// Used by the rail overlay to draw a tight rect that hugs the
+    /// actual line, not the block-wide LineInfo Y/Height. Filled at
+    /// the same time as <see cref="_analysisCache"/>.</summary>
+    private readonly Dictionary<int, List<List<RectF>>> _lineRectsCache = new();
 
     /// <summary>Tracks in-flight background analysis tasks per page so
     /// concurrent callers (zoom-cross trigger + first ↓ press) reuse
@@ -72,6 +81,29 @@ public partial class MainViewModel : ViewModelBase
     /// inside the user-gesture stack frame) doesn't race the render
     /// pipeline's lazy load.</summary>
     private readonly Dictionary<int, Task<PageText>> _pendingPageText = new();
+
+    /// <summary>Decoration-block indices per page, as computed by
+    /// <see cref="KlampflDecoration.DetectDecoration"/>. Rail-mode
+    /// navigation skips blocks whose index is in this set, so the
+    /// user doesn't step through running headers / footers /
+    /// page numbers as if they were body paragraphs.</summary>
+    private readonly Dictionary<int, HashSet<int>> _decoration = new();
+
+    /// <summary>Per-block text cache used by the decoration
+    /// classifier. Filled as a side effect of
+    /// <see cref="EnsureBlockTextsAsync"/>.</summary>
+    private readonly Dictionary<int, List<BlockWithText>> _blockTextsCache = new();
+
+    private bool _decorationRunPending;
+
+    /// <summary>Monotonic generation counter. <see cref="OpenAsync"/>
+    /// bumps it; every async helper captures the value at start and
+    /// discards results if it changed (i.e. a new document loaded
+    /// while the helper was awaiting JS interop). This is the fix for
+    /// the v0.7.0 hang where opening a second PDF froze the app —
+    /// pending analyses from the old doc were writing into the cache
+    /// of the new doc and getting wedged.</summary>
+    private int _generation;
 
     /// <summary>Lazy per-page text cache. PdfPig.ExtractPageText re-opens
     /// the document on each call (Core.PdfPig.PdfTextService doesn't yet
@@ -202,6 +234,19 @@ public partial class MainViewModel : ViewModelBase
             if (CurrentBlockIndex < 0 || CurrentLineIndex < 0) return null;
             if (!_analysisCache.TryGetValue(CurrentPage, out var a)) return null;
             if (CurrentBlockIndex >= a.Blocks.Count) return null;
+
+            // Prefer the parallel per-line rects cache — those carry
+            // the actual line extent (left, top, right, bottom), so
+            // the overlay hugs the visible text. Fall back to the
+            // block-wide rect if the cache hasn't been populated for
+            // some reason.
+            if (_lineRectsCache.TryGetValue(CurrentPage, out var blockRects)
+                && CurrentBlockIndex < blockRects.Count
+                && CurrentLineIndex < blockRects[CurrentBlockIndex].Count)
+            {
+                return blockRects[CurrentBlockIndex][CurrentLineIndex];
+            }
+
             var block = a.Blocks[CurrentBlockIndex];
             if (CurrentLineIndex >= block.Lines.Count) return null;
             var line = block.Lines[CurrentLineIndex];
@@ -311,6 +356,10 @@ public partial class MainViewModel : ViewModelBase
             await stream.CopyToAsync(memory);
             var bytes = memory.ToArray();
 
+            // Bump generation BEFORE any await so any in-flight tasks
+            // from the previous doc see the change as soon as they
+            // resume — they'll bail without writing into the caches.
+            _generation++;
             _session?.Dispose();
 
             var runtime = PdfJsRuntimeRegistry.Current
@@ -326,7 +375,10 @@ public partial class MainViewModel : ViewModelBase
             _pageTextCache.Clear();
             _pendingPageText.Clear();
             _analysisCache.Clear();
+            _lineRectsCache.Clear();
             _pendingAnalysis.Clear();
+            _decoration.Clear();
+            _blockTextsCache.Clear();
             CurrentBlockIndex = -1;
             CurrentLineIndex = -1;
             ClearSearchHits();
@@ -390,11 +442,7 @@ public partial class MainViewModel : ViewModelBase
 
         if (CurrentBlockIndex < 0)
         {
-            // Default entry — View should have already called
-            // EnterRailModeNearPageY before this fires; if it didn't
-            // (analysis still pending at View's call), fall back to
-            // top-of-page in reading order.
-            CurrentBlockIndex = 0;
+            CurrentBlockIndex = FindFirstNonDecoration(CurrentPage, analysis, forward: true);
             CurrentLineIndex = 0;
             return;
         }
@@ -403,22 +451,24 @@ public partial class MainViewModel : ViewModelBase
         if (CurrentLineIndex < block.Lines.Count - 1)
         {
             CurrentLineIndex++;
+            return;
         }
-        else if (CurrentBlockIndex < analysis.Blocks.Count - 1)
+
+        // Advance to next non-decoration block on this page (in
+        // reading order).
+        int nextBlock = NextNonDecorationBlock(CurrentPage, analysis, CurrentBlockIndex);
+        if (nextBlock >= 0)
         {
-            CurrentBlockIndex++;
+            CurrentBlockIndex = nextBlock;
             CurrentLineIndex = 0;
         }
         else if (CanNext)
         {
-            // Advance to next page, top-of-page-in-reading-order. The
-            // analysis for the new page may not be ready yet —
-            // EnsurePageAnalysisAsync handles the wait.
             await NextAsync();
             var newAnalysis = await EnsurePageAnalysisAsync(CurrentPage);
             if (newAnalysis.Blocks.Count > 0)
             {
-                CurrentBlockIndex = 0;
+                CurrentBlockIndex = FindFirstNonDecoration(CurrentPage, newAnalysis, forward: true);
                 CurrentLineIndex = 0;
             }
         }
@@ -523,7 +573,7 @@ public partial class MainViewModel : ViewModelBase
 
         if (CurrentBlockIndex < 0)
         {
-            CurrentBlockIndex = 0;
+            CurrentBlockIndex = FindFirstNonDecoration(CurrentPage, analysis, forward: true);
             CurrentLineIndex = 0;
             return;
         }
@@ -531,11 +581,14 @@ public partial class MainViewModel : ViewModelBase
         if (CurrentLineIndex > 0)
         {
             CurrentLineIndex--;
+            return;
         }
-        else if (CurrentBlockIndex > 0)
+
+        int prevBlock = PrevNonDecorationBlock(CurrentPage, analysis, CurrentBlockIndex);
+        if (prevBlock >= 0)
         {
-            CurrentBlockIndex--;
-            var prev = analysis.Blocks[CurrentBlockIndex];
+            CurrentBlockIndex = prevBlock;
+            var prev = analysis.Blocks[prevBlock];
             CurrentLineIndex = Math.Max(0, prev.Lines.Count - 1);
         }
         else if (CanPrev)
@@ -544,7 +597,7 @@ public partial class MainViewModel : ViewModelBase
             var newAnalysis = await EnsurePageAnalysisAsync(CurrentPage);
             if (newAnalysis.Blocks.Count > 0)
             {
-                CurrentBlockIndex = newAnalysis.Blocks.Count - 1;
+                CurrentBlockIndex = FindFirstNonDecoration(CurrentPage, newAnalysis, forward: false);
                 var lastBlock = newAnalysis.Blocks[CurrentBlockIndex];
                 CurrentLineIndex = Math.Max(0, lastBlock.Lines.Count - 1);
             }
@@ -762,17 +815,20 @@ public partial class MainViewModel : ViewModelBase
         if (_pageTextCache.TryGetValue(pageIndex, out var cached)) return cached;
         if (_pendingPageText.TryGetValue(pageIndex, out var pending)) return await pending;
         if (_session is null) return new PageText("", []);
+        int gen = _generation;
         var task = _session.GetPageTextAsync(pageIndex);
         _pendingPageText[pageIndex] = task;
         try
         {
             var result = await task;
+            // Bail if a new document loaded while we were awaiting JS.
+            if (gen != _generation) return new PageText("", []);
             _pageTextCache[pageIndex] = result;
             return result;
         }
         finally
         {
-            _pendingPageText.Remove(pageIndex);
+            if (gen == _generation) _pendingPageText.Remove(pageIndex);
         }
     }
 
@@ -813,34 +869,74 @@ public partial class MainViewModel : ViewModelBase
         if (_session is null) return new PageAnalysis { Blocks = [], PageWidth = 0, PageHeight = 0 };
 
         var session = _session;
-        var resolver = _resolver;
-        // PDF.js's getTextContent already runs in a Web Worker, so we
-        // don't need Task.Run to keep the UI thread free — awaiting
-        // directly is enough.
-        async Task<PageAnalysis> Compute()
+        int gen = _generation;
+        // Compute returns the reordered blocks AND the parallel line-
+        // rects list. We can't stuff the latter on PageAnalysis (Core
+        // type), so the caller commits it to _lineRectsCache after
+        // the generation check passes.
+        async Task<(PageAnalysis Analysis, List<List<RectF>> LineRects)> Compute()
         {
             var (w, h) = await session.GetPageSizeAsync(pageIndex);
-            var blocks = await session.GetBlocksAsync(pageIndex);
-            resolver.AssignOrder(blocks, w, h);
-            blocks.Sort((a, b) => a.Order.CompareTo(b.Order));
-            return new PageAnalysis { Blocks = blocks, PageWidth = w, PageHeight = h };
+            var segment = await session.GetBlocksAsync(pageIndex);
+            int n = segment.Blocks.Count;
+            if (n == 0)
+                return (new PageAnalysis { Blocks = [], PageWidth = w, PageHeight = h }, new List<List<RectF>>());
+
+            // Pre-reorder dump so we can see what Docstrum produced
+            // before Klampfl rearranges. Helps tell apart a
+            // segmenter bug from a reading-order bug.
+            System.Console.WriteLine(
+                $"[RailReaderLite] segmenter page {pageIndex}: {n} raw blocks");
+            for (int i = 0; i < n; i++)
+            {
+                var bb = segment.Blocks[i].BBox;
+                System.Console.WriteLine(
+                    $"  raw {i}: x={bb.X:F1} y={bb.Y:F1} " +
+                    $"w={bb.W:F1} h={bb.H:F1}  lines={segment.Blocks[i].Lines.Count}");
+            }
+
+            float tol = (float)(w * 0.005f);
+            var order = KlampflReadingOrder.DetectOrder(segment.Blocks, tol, ReadingMode.ColumnWise);
+            var orderedBlocks = new List<LayoutBlock>(n);
+            var orderedRects  = new List<List<RectF>>(n);
+            for (int rank = 0; rank < order.Length; rank++)
+            {
+                var b = segment.Blocks[order[rank]];
+                b.Order = rank;
+                orderedBlocks.Add(b);
+                orderedRects.Add(segment.LineRects[order[rank]]);
+            }
+            return (new PageAnalysis { Blocks = orderedBlocks, PageWidth = w, PageHeight = h }, orderedRects);
         }
-        var task = Compute();
+        var computeTask = Compute();
+        // _pendingAnalysis holds a Task<PageAnalysis> for callers that
+        // want to share the in-flight work. We adapt by unwrapping.
+        var task = AsAnalysisTask(computeTask);
         _pendingAnalysis[pageIndex] = task;
 
         PageAnalysis result;
+        List<List<RectF>> lineRects;
         try
         {
-            result = await task;
+            var tuple = await computeTask;
+            result = tuple.Analysis;
+            lineRects = tuple.LineRects;
         }
         catch (Exception ex)
         {
-            _pendingAnalysis.Remove(pageIndex);
-            StatusText = $"Analysis failed for page {pageIndex + 1}: {ex.Message}";
+            if (gen == _generation) _pendingAnalysis.Remove(pageIndex);
+            if (gen == _generation)
+                StatusText = $"Analysis failed for page {pageIndex + 1}: {ex.Message}";
             return new PageAnalysis { Blocks = [], PageWidth = 0, PageHeight = 0 };
         }
 
+        // Bail if a new doc loaded mid-analysis — don't poison the new
+        // doc's cache with results from the old one.
+        if (gen != _generation)
+            return new PageAnalysis { Blocks = [], PageWidth = 0, PageHeight = 0 };
+
         _analysisCache[pageIndex] = result;
+        _lineRectsCache[pageIndex] = lineRects;
         _pendingAnalysis.Remove(pageIndex);
 
         if (pageIndex == CurrentPage)
@@ -857,8 +953,40 @@ public partial class MainViewModel : ViewModelBase
             RailLastLineOfBlockCommand.NotifyCanExecuteChanged();
             RailFirstLineOfPageCommand.NotifyCanExecuteChanged();
             RailLastLineOfPageCommand.NotifyCanExecuteChanged();
+
+            // Diagnostic logging — surfaces block geometry + reading
+            // order to the JS console so we can see what the
+            // segmenter is actually producing on a user-supplied
+            // document. Remove (or gate) once the column-awareness
+            // story has settled.
+            LogAnalysisToConsole(pageIndex, result);
+
+            // Fire-and-forget decoration detection — runs once per
+            // document, requires ≥2 analyzed pages. Kicks off in the
+            // background so the user's first ↓ isn't blocked.
+            _ = EnsureDecorationDetectedAsync();
         }
         return result;
+    }
+
+    /// <summary>Dumps per-page block geometry and reading order to
+    /// <c>Console.WriteLine</c>, which Avalonia.Browser pipes into the
+    /// browser console. Used to diagnose "rail mode not column-aware"
+    /// reports without needing a custom debug UI.</summary>
+    private static void LogAnalysisToConsole(int pageIndex, PageAnalysis a)
+    {
+        System.Console.WriteLine(
+            $"[RailReaderLite] page {pageIndex}: {a.Blocks.Count} blocks, " +
+            $"pageSize {a.PageWidth:F1}×{a.PageHeight:F1}");
+        for (int i = 0; i < a.Blocks.Count; i++)
+        {
+            var b = a.Blocks[i];
+            System.Console.WriteLine(
+                $"  block {i} (order={b.Order}) " +
+                $"x={b.BBox.X:F1} y={b.BBox.Y:F1} " +
+                $"w={b.BBox.W:F1} h={b.BBox.H:F1}  " +
+                $"lines={b.Lines.Count}");
+        }
     }
 
     /// <summary>Cache-only lookup — used by the rail-nav commands when
@@ -866,6 +994,121 @@ public partial class MainViewModel : ViewModelBase
     /// background analysis may not have completed yet.</summary>
     private PageAnalysis? TryGetCachedAnalysis(int pageIndex) =>
         _analysisCache.TryGetValue(pageIndex, out var a) ? a : null;
+
+    private static async Task<PageAnalysis> AsAnalysisTask(
+        Task<(PageAnalysis Analysis, List<List<RectF>> LineRects)> tuple)
+    {
+        var t = await tuple;
+        return t.Analysis;
+    }
+
+    /// <summary>Builds the per-block text payload for the decoration
+    /// classifier. For each block in the analysis, concatenates all
+    /// text items whose centre falls inside the block bbox.</summary>
+    private async Task<List<BlockWithText>> EnsureBlockTextsAsync(int pageIndex)
+    {
+        if (_blockTextsCache.TryGetValue(pageIndex, out var cached)) return cached;
+        if (_session is null) return new List<BlockWithText>();
+        int gen = _generation;
+        var analysis = await EnsurePageAnalysisAsync(pageIndex);
+        if (gen != _generation) return new List<BlockWithText>();
+        if (analysis.Blocks.Count == 0)
+        {
+            var empty = new List<BlockWithText>();
+            _blockTextsCache[pageIndex] = empty;
+            return empty;
+        }
+        var items = await _session.GetTextItemsAsync(pageIndex);
+        if (gen != _generation) return new List<BlockWithText>();
+        var result = new List<BlockWithText>(analysis.Blocks.Count);
+        foreach (var b in analysis.Blocks)
+        {
+            float left = b.BBox.X, top = b.BBox.Y;
+            float right = left + b.BBox.W, bottom = top + b.BBox.H;
+            var sb = new System.Text.StringBuilder();
+            foreach (var it in items)
+            {
+                float cx = (float)(it.X + it.Width * 0.5);
+                float cy = (float)(it.Y + it.Height * 0.5);
+                if (cx < left || cx > right || cy < top || cy > bottom) continue;
+                if (sb.Length > 0) sb.Append(' ');
+                sb.Append(it.Text);
+            }
+            result.Add(new BlockWithText(b.BBox.X, b.BBox.Y, b.BBox.W, b.BBox.H, sb.ToString()));
+        }
+        _blockTextsCache[pageIndex] = result;
+        return result;
+    }
+
+    /// <summary>Runs Klampfl decoration detection across all pages,
+    /// once we have enough analyzed pages to do so. Idempotent — the
+    /// guard at the top short-circuits if the cache is already
+    /// populated. Triggered from
+    /// <see cref="EnsurePageAnalysisAsync"/>'s completion path.</summary>
+    private async Task EnsureDecorationDetectedAsync()
+    {
+        if (_decorationRunPending) return;
+        if (_decoration.Count >= PageCount) return;  // already done
+        if (PageCount < 2) return;                   // need ≥2 pages
+        if (_session is null) return;
+
+        _decorationRunPending = true;
+        try
+        {
+            // Ensure block-texts for every page. Cheap when analysis
+            // is already cached.
+            var pages = new List<IReadOnlyList<BlockWithText>>(PageCount);
+            for (int p = 0; p < PageCount; p++)
+                pages.Add(await EnsureBlockTextsAsync(p));
+
+            var result = KlampflDecoration.DetectDecoration(pages);
+            if (result is null) return;
+            for (int p = 0; p < result.Count; p++) _decoration[p] = result[p];
+
+            // Currently-active block might be a decoration block now;
+            // bump to the next non-decoration one.
+            if (IsRailMode && CurrentBlockIndex >= 0 && IsDecoration(CurrentPage, CurrentBlockIndex))
+                _ = RailNextLineAsync();
+        }
+        finally
+        {
+            _decorationRunPending = false;
+        }
+    }
+
+    private bool IsDecoration(int pageIndex, int blockIndex) =>
+        _decoration.TryGetValue(pageIndex, out var s) && s.Contains(blockIndex);
+
+    /// <summary>First non-decoration block on a page, scanning either
+    /// from index 0 forward or from the last index backward. Falls
+    /// back to index 0 / last if every block is flagged as decoration
+    /// (degenerate edge case — shouldn't happen on real pages).</summary>
+    private int FindFirstNonDecoration(int page, PageAnalysis analysis, bool forward)
+    {
+        int n = analysis.Blocks.Count;
+        if (n == 0) return -1;
+        if (forward)
+        {
+            for (int i = 0; i < n; i++) if (!IsDecoration(page, i)) return i;
+            return 0;
+        }
+        for (int i = n - 1; i >= 0; i--) if (!IsDecoration(page, i)) return i;
+        return n - 1;
+    }
+
+    private int NextNonDecorationBlock(int page, PageAnalysis analysis, int from)
+    {
+        for (int i = from + 1; i < analysis.Blocks.Count; i++)
+            if (!IsDecoration(page, i)) return i;
+        return -1;
+    }
+
+    private int PrevNonDecorationBlock(int page, PageAnalysis analysis, int from)
+    {
+        for (int i = from - 1; i >= 0; i--)
+            if (!IsDecoration(page, i)) return i;
+        return -1;
+    }
 
     /// <summary>
     /// Called by the View on the user's first rail-mode keystroke so
@@ -878,6 +1121,75 @@ public partial class MainViewModel : ViewModelBase
     /// "start at block[0] line[0]" behaviour by setting the indices
     /// directly.
     /// </summary>
+    /// <summary>
+    /// Click-to-snap: pick the block whose bbox contains the point,
+    /// or (fallback) the block nearest by 2D distance to centre.
+    /// Within that block, pick the line whose Y-centre is nearest.
+    /// Skips decoration blocks so a click in the page-number area
+    /// jumps to the body line below it instead of landing on the
+    /// number. Replaces <see cref="EnterRailModeNearPageY"/>'s
+    /// Y-only heuristic for the click case, which couldn't pick
+    /// between columns at the same Y.
+    /// </summary>
+    public void EnterRailModeNearPagePoint(float pageX, float pageY)
+    {
+        if (!_analysisCache.TryGetValue(CurrentPage, out var analysis)) return;
+        if (analysis.Blocks.Count == 0) return;
+
+        int bestBlock = -1;
+        float bestBlockDist = float.MaxValue;
+        for (int i = 0; i < analysis.Blocks.Count; i++)
+        {
+            if (IsDecoration(CurrentPage, i)) continue;
+            var b = analysis.Blocks[i].BBox;
+            if (pageX >= b.X && pageX <= b.X + b.W && pageY >= b.Y && pageY <= b.Y + b.H)
+            {
+                bestBlock = i;
+                break;
+            }
+            float cx = b.X + b.W * 0.5f;
+            float cy = b.Y + b.H * 0.5f;
+            float dx = pageX - cx;
+            float dy = pageY - cy;
+            float dist = dx * dx + dy * dy;
+            if (dist < bestBlockDist) { bestBlockDist = dist; bestBlock = i; }
+        }
+        if (bestBlock < 0) return;
+
+        int bestLine = 0;
+        // Prefer per-line rect Y midpoint — that's the actual visible
+        // baseline rather than the LineInfo Y-Height range, which
+        // matters when sub/superscripts stretch the Height value.
+        if (_lineRectsCache.TryGetValue(CurrentPage, out var rects)
+            && bestBlock < rects.Count && rects[bestBlock].Count > 0)
+        {
+            var blockRects = rects[bestBlock];
+            float bestLineDist = float.MaxValue;
+            for (int j = 0; j < blockRects.Count; j++)
+            {
+                float cy = (blockRects[j].Top + blockRects[j].Bottom) * 0.5f;
+                float d = Math.Abs(pageY - cy);
+                if (d < bestLineDist) { bestLineDist = d; bestLine = j; }
+            }
+        }
+        else
+        {
+            var block = analysis.Blocks[bestBlock];
+            if (block.Lines.Count > 0)
+            {
+                float bestLineDist = float.MaxValue;
+                for (int j = 0; j < block.Lines.Count; j++)
+                {
+                    float d = Math.Abs(pageY - block.Lines[j].Y);
+                    if (d < bestLineDist) { bestLineDist = d; bestLine = j; }
+                }
+            }
+        }
+
+        CurrentBlockIndex = bestBlock;
+        CurrentLineIndex = bestLine;
+    }
+
     public void EnterRailModeNearPageY(float pageY)
     {
         if (!_analysisCache.TryGetValue(CurrentPage, out var analysis)) return;

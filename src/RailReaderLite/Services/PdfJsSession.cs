@@ -56,6 +56,15 @@ public sealed class PdfJsSession : IDisposable
         _runtime.GetOutlineAsync(_docId);
 
     /// <summary>
+    /// Exposes the underlying PDF.js text items so the VM can build
+    /// per-block text (needed by the decoration classifier — see
+    /// <see cref="KlampflDecoration"/>). The JS shim caches these per
+    /// page so repeated calls are O(1).
+    /// </summary>
+    public Task<IReadOnlyList<PdfTextItem>> GetTextItemsAsync(int pageIndex) =>
+        _runtime.GetTextItemsAsync(_docId, pageIndex);
+
+    /// <summary>
     /// Builds the per-page <see cref="PageText"/> (concatenated string
     /// + per-character <see cref="CharBox"/>es in reading order)
     /// from PDF.js's word-level text items. Each item is a continuous
@@ -146,34 +155,26 @@ public sealed class PdfJsSession : IDisposable
     }
 
     /// <summary>
-    /// Word-level layout analysis. PDF.js text items are already word-
-    /// sized so column gutters fall naturally between items, which is
-    /// exactly what the column-aware DLA we couldn't get from char-only
-    /// Docstrum needs. Returns blocks with <see cref="LayoutBlock.Lines"/>
-    /// populated, in page-point space.
+    /// Word-level layout analysis. PDF.js text items are word-sized
+    /// so column gutters fall naturally between items. Delegates to
+    /// <see cref="DocstrumSegmenter.Segment"/>; returns both the
+    /// blocks (with <see cref="LayoutBlock.Lines"/> populated) and a
+    /// parallel list of per-line rects (the latter is what the rail
+    /// overlay needs since <see cref="LineInfo"/> is just Y + Height).
     /// </summary>
-    public async Task<List<LayoutBlock>> GetBlocksAsync(int pageIndex)
+    public async Task<DocstrumSegmenter.SegmentResult> GetBlocksAsync(int pageIndex)
     {
         var items = await _runtime.GetTextItemsAsync(_docId, pageIndex);
-        return ClusterItemsIntoBlocks(items);
+        var (pageW, pageH) = await _runtime.GetPageSizeAsync(_docId, pageIndex);
+        return DocstrumSegmenter.Segment(items, pageW, pageH);
     }
 
     /// <summary>
-    /// Two-phase clustering:
-    /// <list type="number">
-    ///   <item><description><b>Items → lines.</b> Sort items by mid-Y,
-    ///   walk and start a new line whenever the running cluster's
-    ///   mean mid-Y differs by more than 0.5 × median item height.
-    ///   Within a line, sort by X and split if the horizontal gap
-    ///   exceeds 2 × median item width — this is what catches column
-    ///   gutters when two columns happen to align vertically.</description></item>
-    ///   <item><description><b>Lines → blocks.</b> Sort lines by top
-    ///   then left. For each line, find the most recent block whose
-    ///   X-range overlaps and whose vertical distance is below the
-    ///   gap threshold; extend it. If no such block, start a new one.
-    ///   The X-overlap requirement keeps inter-column lines in
-    ///   separate blocks even when they interleave vertically.</description></item>
-    /// </list>
+    /// Legacy fixed-threshold clusterer — superseded by
+    /// <see cref="DocstrumSegmenter.Segment"/> in v0.8.0. Kept here
+    /// only as a reference / fallback during the bring-up; will be
+    /// removed once the Docstrum port has been validated against
+    /// the user's PDF corpus.
     /// </summary>
     internal static List<LayoutBlock> ClusterItemsIntoBlocks(IReadOnlyList<PdfTextItem> items)
     {
